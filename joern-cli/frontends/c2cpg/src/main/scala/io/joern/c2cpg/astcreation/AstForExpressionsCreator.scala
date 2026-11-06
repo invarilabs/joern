@@ -479,7 +479,7 @@ trait AstForExpressionsCreator { this: AstCreator =>
         name,
         DispatchTypes.STATIC_DISPATCH,
         None,
-        Some(Defines.Any)
+        Some(if (hasCTypeEvidence) requiredCExpressionType(arrayIndexExpression) else Defines.Any)
       )
 
     val expr = astForExpression(arrayIndexExpression.getArrayExpression)

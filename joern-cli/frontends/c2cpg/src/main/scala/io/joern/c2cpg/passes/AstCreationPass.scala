@@ -2,7 +2,7 @@ package io.joern.c2cpg.passes
 
 import io.joern.c2cpg.C2Cpg
 import io.joern.c2cpg.Config
-import io.joern.c2cpg.astcreation.AstCreator
+import io.joern.c2cpg.astcreation.{AstCreator, CTypeEvidenceException}
 import io.joern.c2cpg.parser.CdtParser
 import io.joern.c2cpg.parser.CdtParser.HeaderFileParserLanguage
 import io.joern.c2cpg.parser.FileDefaults
@@ -198,6 +198,11 @@ class AstCreationPass(
             logger.debug(s"Processed ‘$relPath’")
             true
           } catch {
+            case evidence: CTypeEvidenceException =>
+              throw new CTypeEvidenceException(
+                s"$relPath: ${evidence.getMessage}; correct the C source/build context or add explicit type support",
+                evidence
+              )
             case s: StackOverflowError =>
               /**   - Eclipse CDT’s C/C++ type inference/analysis is heavily recursive. For certain real-world inputs
                 *     this can create extremely deep call stacks and trigger a JVM `StackOverflowError`.
