@@ -21,6 +21,14 @@ class C2Cpg extends X2CpgFrontend {
   private val logger = LoggerFactory.getLogger(classOf[C2Cpg])
 
   def createCpg(config: Config): Try[Cpg] = {
+    if (config.parserBackend == "clang") {
+      return io.joern.c2cpg.parser.clang.ClangCpg.create(config)
+    }
+    require(config.parserBackend == "cdt", "unknown parser backend; select cdt or clang")
+    require(
+      config.clangCommand.isEmpty && config.clangPlugin.isEmpty && config.clangEvidenceDir.isEmpty,
+      "Clang options require explicit --parser clang; no CDT substitution is permitted"
+    )
     withNewEmptyCpg(config.outputPath, config) { (cpg, config) =>
       val report = new Report()
       new MetaDataPass(cpg, Languages.NEWC, config.inputPath).createAndApply()
@@ -70,6 +78,10 @@ class C2Cpg extends X2CpgFrontend {
   }
 
   def printIfDefsOnly(config: Config): Unit = {
+    require(
+      config.parserBackend == "cdt",
+      "Clang preprocessor-only mode is not implemented; no CDT substitution is permitted"
+    )
     try {
       new PreprocessorPass(config).run().foreach(stmt => print(s"$stmt,"))
     } catch {

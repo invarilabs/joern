@@ -134,8 +134,9 @@ trait AstCreatorHelper { this: AstCreator =>
   protected def safeCdtCall[T](call: => T): Option[T] = {
     try { Option(call) }
     catch {
-      case _: StackOverflowError => None
-      case NonFatal(_)           => None
+      case evidence: CTypeEvidenceException => throw evidence
+      case _: StackOverflowError            => None
+      case NonFatal(_)                      => None
     }
   }
 
