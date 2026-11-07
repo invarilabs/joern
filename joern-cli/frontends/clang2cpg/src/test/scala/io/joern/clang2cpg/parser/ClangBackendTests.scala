@@ -47,6 +47,18 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain GNU statement expressions as typed value blocks with their declarations" in {
+      withGraph("int f(void) {return ({int a=1; a+2;});}") { (graph, _) =>
+        val block = graph.block.filter(node => node._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.kind" && tag.value == "StmtExpr"
+          case _ => false
+        }).head
+        block.typeFullName shouldBe "int"
+        block.ast.isLocal.name.toList shouldBe List("a")
+        block.ast.isCall.name.toList should contain ("<operator>.addition")
+      }
+    }
+
     "reject unsupported C++ declarations instead of silently producing an empty graph" in {
       val (directory, config) = setup("struct A {int f() {return 1;}};")
       Files.writeString(directory.resolve("command.json"), ujson.write(Seq(

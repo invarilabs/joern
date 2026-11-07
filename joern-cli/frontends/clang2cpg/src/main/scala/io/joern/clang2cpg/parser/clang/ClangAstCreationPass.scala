@@ -563,6 +563,13 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           builder.addEdge(result, receiver, EdgeTypes.RECEIVER)
           result
         }
+      case "StmtExpr" =>
+        require(operands.size == 1 && kind(operands.head) == "CompoundStmt", "Clang statement expression requires one compound body")
+        val block = NewBlock().code(text(original)).typeFullName(valueType(original))
+        annotate(block, original)
+        add(block)
+        children(operands.head).flatMap(statements).zipWithIndex.foreach { case (child, index) => ast(block, child, index + 1) }
+        block
       case "InitListExpr" =>
         original.obj.get("array_filler") match {
           case None => call(original, "<operator>.arrayInitializer", operands.map(expression))
