@@ -13,7 +13,7 @@ lazy val clang2cpg = (project in file("."))
       val runtime = file(sys.env.getOrElse("JOERN_RUNTIME", sys.error("Set JOERN_RUNTIME to pinned stock Joern")))
       val directory = runtime / "frontends" / "c2cpg" / "lib"
       require(directory.isDirectory, s"Missing stock frontend libraries: $directory")
-      val jars = (directory * "*.jar").get.sorted.filterNot(_.getName.startsWith("io.joern.c2cpg-"))
+      val jars = (directory * "*.jar").get().sorted.filterNot(_.getName.startsWith("io.joern.c2cpg-"))
       require(jars.nonEmpty, "Stock Joern runtime classpath is empty")
       jars.classpath
     },
