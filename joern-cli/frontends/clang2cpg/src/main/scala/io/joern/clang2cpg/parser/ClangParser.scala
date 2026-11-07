@@ -25,6 +25,22 @@ final case class ClangEvidence(
 }
 
 object ClangParser {
+  private[parser] final case class ProtectedInput(alias: Path, target: Path, sha256: String) {
+    def validate(): Unit = {
+      require(Files.isRegularFile(alias) && alias.toRealPath() == target,
+        s"Clang input/tool alias target changed during capture: $alias; prepare fresh evidence")
+      require(Files.isRegularFile(target) && digest(target) == sha256,
+        s"Clang input/tool changed during capture: $target; prepare fresh evidence")
+    }
+  }
+
+  private[parser] def protect(path: Path): ProtectedInput = {
+    val alias = path.toAbsolutePath
+    val target = alias.toRealPath()
+    require(Files.isRegularFile(target), s"Clang protected input/tool is not a regular file: $path")
+    ProtectedInput(alias, target, digest(target))
+  }
+
   def digest(path: Path): String = {
     val digest = MessageDigest.getInstance("SHA-256")
     val stream = Files.newInputStream(path)
@@ -58,7 +74,7 @@ object ClangParser {
       "Clang command contains competing capture/output flags; remove them from the explicit command")
     require(!selected.exists(value => Set("-load", "-plugin", "-add-plugin")(value) || value.startsWith("-fplugin")),
       "External compiler plugins are unsupported in the capture command; configure only the matching exporter")
-    val protectedInputs = (Seq(source, compiler, plugin) ++ input.protectedInputs).distinct.map(path => path -> digest(path))
+    val protectedInputs = (Seq(source, compiler, plugin) ++ input.protectedInputs).distinct.map(protect)
     Files.createDirectories(directory)
     val documentPath = directory.resolve("clang.json")
     val command      = selected.dropRight(1) ++ Seq(
@@ -106,9 +122,7 @@ object ClangParser {
       process.exitValue() == 0 && Files.isRegularFile(documentPath),
       s"Clang frontend failed or did not emit complete evidence; inspect ${directory.resolve("compiler.log")}"
     )
-    protectedInputs.foreach { case (path, expected) =>
-      require(digest(path) == expected, s"Clang input/tool changed during capture: $path; prepare fresh evidence")
-    }
+    protectedInputs.foreach(_.validate())
     val document = ujson.read(Files.readString(documentPath))
     require(
       document("schema_version").num == 1 && document("ast")("kind").str == "TranslationUnitDecl",
@@ -133,7 +147,7 @@ object ClangParser {
           "artifacts" -> ujson.Obj.from(artifacts.map(path => path.getFileName.toString -> ujson.Str(digest(path)))),
           "command_sha256"  -> digest(directory.resolve("command.json")),
           "evidence_sha256" -> digest(documentPath),
-          "tools" -> ujson.Obj.from(protectedInputs.map { case (path, hash) => path.toString -> ujson.Str(hash) })
+          "tools" -> ujson.Obj.from(protectedInputs.map(input => input.target.toString -> ujson.Str(input.sha256)).distinct)
         ),
         indent = 2
       )
