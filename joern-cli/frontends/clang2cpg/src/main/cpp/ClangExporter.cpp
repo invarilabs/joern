@@ -198,7 +198,8 @@ public:
     if (Position.isInvalid() || !Manager.isWrittenInMainFile(Manager.getExpansionLoc(Position))) return;
     auto Entry = location(Condition, Manager, PreprocessorRef.getLangOpts());
     Entry["kind"] = Kind.str();
-    Entry["condition"] = *Entry.getString("code");
+    const std::string ConditionText = Entry.getString("code")->str();
+    Entry["condition"] = ConditionText;
     Entry["line"] = Manager.getExpansionLineNumber(Position);
     if (Output->LogPreprocessor)
       llvm::errs() << *Entry.getString("file") << ":" << *Entry.getInteger("line")
@@ -339,8 +340,18 @@ public:
 };
 class Consumer : public ASTConsumer {
   std::shared_ptr<Evidence> Output; std::string Destination; Preprocessor &Processor;
+  std::unique_ptr<CommentEvidence> Comments;
 public:
-  Consumer(std::shared_ptr<Evidence> Data, std::string Path, Preprocessor &Input) : Output(std::move(Data)), Destination(std::move(Path)), Processor(Input) {}
+  Consumer(std::shared_ptr<Evidence> Data, std::string Path, Preprocessor &Input)
+      : Output(std::move(Data)), Destination(std::move(Path)), Processor(Input) {
+    if (Output->IncludeComments) {
+      Comments = std::make_unique<CommentEvidence>(Output);
+      Processor.addCommentHandler(Comments.get());
+    }
+  }
+  ~Consumer() override {
+    if (Comments) Processor.removeCommentHandler(Comments.get());
+  }
   void HandleTranslationUnit(ASTContext &Context) override {
     if (Context.getDiagnostics().hasErrorOccurred()) return;
     Visitor Collector(Context, *Output); Collector.TraverseDecl(Context.getTranslationUnitDecl());
@@ -388,7 +399,6 @@ public:
 };
 class Action : public PluginASTAction {
   std::shared_ptr<Evidence> Output = std::make_shared<Evidence>(); std::string Destination;
-  std::unique_ptr<CommentEvidence> Comments;
   bool ParseArgs(const CompilerInstance &, const std::vector<std::string> &Arguments) override {
     if (Arguments.empty() || Arguments[0].empty()) return false;
     Destination = Arguments[0];
@@ -402,10 +412,6 @@ class Action : public PluginASTAction {
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &Compiler, llvm::StringRef) override {
     Preprocessor &Processor = Compiler.getPreprocessor();
     Processor.addPPCallbacks(std::make_unique<MacroEvidence>(Processor, Output));
-    if (Output->IncludeComments) {
-      Comments = std::make_unique<CommentEvidence>(Output);
-      Processor.addCommentHandler(Comments.get());
-    }
     Processor.setTokenWatcher([Data = Output, &Processor](const Token &Part) {
       if (Part.isAnnotation()) return;
       // Use Clang's token spelling/location APIs for the existing strict token

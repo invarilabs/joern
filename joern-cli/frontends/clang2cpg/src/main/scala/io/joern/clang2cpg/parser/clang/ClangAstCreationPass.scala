@@ -8,7 +8,7 @@ import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
 /** Native Clang syntax to CPG. Unsupported executable shapes abort graph creation. */
-class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false) extends CpgPass(graph) {
+class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false) extends CpgPass(graph) {
   private val root = graphRoot.getOrElse(evidence.source.getParent)
   private val scope = graphRoot.map(_ => "tu:" + root.relativize(evidence.source).toString + ":").getOrElse("")
   private def scoped(name: String): String = scope + name
@@ -153,6 +153,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   private def namespace(file: String): NewNamespaceBlock = namespaces.getOrElseUpdate(
     file, {
       val unit = NewFile().name(file).order(0)
+      if (includeFileContent && file != "<compiler>") {
+        val path = Paths.get(file)
+        val absolute = if (path.isAbsolute) path else root.resolve(path)
+        require(java.nio.file.Files.isRegularFile(absolute), s"Source content is unavailable: $absolute")
+        unit.content = java.nio.file.Files.readString(absolute)
+      }
       add(unit)
       val namespace = NewNamespaceBlock().name("<global>").fullName(file + ":<global>").filename(file)
       ast(unit, namespace, 1)

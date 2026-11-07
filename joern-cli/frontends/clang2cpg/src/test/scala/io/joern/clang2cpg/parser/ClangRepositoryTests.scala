@@ -39,7 +39,10 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
         graph.call.nameExact("helper").toList.foreach { call =>
           call._callOut.collect { case method: io.shiftleft.codepropertygraph.generated.nodes.Method => method.filename }.toList shouldBe List(call.method.filename)
         }
-        val records = graph.typeDecl.nameExact("Shared").filter(_.isExternal).toList
+        val records = graph.typeDecl.nameExact("Shared").filter(node => node.isExternal && node._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.kind" && tag.value == "RecordDecl"
+          case _ => false
+        }).toList
         records.size shouldBe 2
         records.map(_.fullName).distinct.size shouldBe 2
         records.foreach { record =>

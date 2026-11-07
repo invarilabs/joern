@@ -22,7 +22,7 @@ object ClangCpg {
       inputs.zipWithIndex.foreach { case (input, index) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
         val evidence = ClangParser.capture(input, plugin, captureDirectory, config)
-        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies)
+        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent)
         syntax.createAndApply()
         syntax.sourceTypeBindings.foreach { case (key, value) =>
           require(!bindings.contains(key) || bindings(key) == value, s"Conflicting compiler type binding: $key")

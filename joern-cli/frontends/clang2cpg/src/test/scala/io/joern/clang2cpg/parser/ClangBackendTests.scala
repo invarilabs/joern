@@ -47,6 +47,14 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain source file content only when explicitly requested" in {
+      val code = "int f(void) {return 1;}"
+      val (_, config) = setup(code)
+      val graph = new Clang2Cpg().createCpg(config.withDisableFileContent(false)).get
+      try graph.file.nameExact("sample.c").content.toList shouldBe List(code)
+      finally graph.close()
+    }
+
     "retain C switch labels and loop exits" in {
       withGraph("int f(int x) {while(x) {--x; if(x == 3) continue; switch(x) {case 1: break; default: return x;}} return 0;}") { (graph, _) =>
         graph.controlStructure.controlStructureType.toList should contain allOf ("BREAK", "CONTINUE", "SWITCH", "WHILE")
@@ -571,7 +579,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       Files.writeString(source, "int value(void) {return 1;}")
       val failure =
         new Clang2Cpg().createCpg(Config().withInputPath(source.toString).copy(parserBackend = "clang")).failed.get
-      failure.getMessage should include("--clang-command")
+      failure.getMessage should include("--clang-plugin")
     }
   }
 }
