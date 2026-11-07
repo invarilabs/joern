@@ -59,11 +59,11 @@ class ClangAssemblyNativeTests extends AnyWordSpec with Matchers {
       label("name").str shouldBe "finished"
       label("declaration").str should not be empty
       document("nodes").obj should contain key(label("expression").str)
-      val generatedLabel = document("nodes")(label("expression").str)
-      generatedLabel("generated").bool shouldBe true
-      generatedLabel("semantic_type")("kind").str shouldBe "Pointer"
-      generatedLabel("label_declaration").str shouldBe label("declaration").str
-      generatedLabel.obj should not contain key("file")
+      val labelNode = document("nodes")(label("expression").str)
+      labelNode("semantic_type")("kind").str shouldBe "Pointer"
+      labelNode("label_declaration").str shouldBe label("declaration").str
+      labelNode("code").str shouldBe "finished"
+      labelNode("file").str should endWith("sample.c")
     }
   }
 }
