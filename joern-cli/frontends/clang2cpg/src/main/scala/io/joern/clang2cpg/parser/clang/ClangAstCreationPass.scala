@@ -110,7 +110,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   private def index(node: ujson.Value): Unit = {
     if (kind(node).endsWith("Decl") && node.obj.contains("id"))
       declarations.get(identity(node)) match {
-        case Some(previous) => require(previous == node, s"Conflicting Clang declaration ${identity(node)}")
+        case Some(previous) => ClangDeclarationShape.requireEquivalent(previous, node)
         case None           => declarations(identity(node)) = node
       }
     children(node).foreach(index)
