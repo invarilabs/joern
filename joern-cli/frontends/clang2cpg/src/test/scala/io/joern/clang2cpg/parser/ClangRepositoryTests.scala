@@ -55,6 +55,9 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
         X2Cpg.applyDefaultOverlays(graph)
         graph.file.name.toSet should contain allOf ("left/common.c", "right/common.c")
         graph.file.name.toList.distinct.size shouldBe graph.file.size
+        val repeatedAnnotations = graph.tag.nameExact("clang.semanticType").value.toList.groupBy(identity).values.filter(_.size > 1).toList
+        repeatedAnnotations.nonEmpty shouldBe true
+        repeatedAnnotations.foreach(values => values.foreach(value => (value eq values.head) shouldBe true))
         def projection(value: io.shiftleft.codepropertygraph.generated.Cpg): List[String] =
           value.file.nameExact("left/common.c", "right/common.c").ast.toList.sortBy(_.id).map(node =>
             node.label + ":" + node.seq + ":" + node.propertyOption[String]("CODE").getOrElse("") + ":" + node.propertyOption[String]("TYPE_FULL_NAME").getOrElse("")

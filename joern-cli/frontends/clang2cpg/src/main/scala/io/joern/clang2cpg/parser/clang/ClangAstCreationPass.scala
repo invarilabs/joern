@@ -9,7 +9,7 @@ import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
 /** Native Clang syntax to CPG. Unsupported executable shapes abort graph creation. */
-class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false, embedNativeEvidence: Boolean = true) extends CpgPass(graph) {
+class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false, embedNativeEvidence: Boolean = true, strings: ClangStringPool = new ClangStringPool) extends CpgPass(graph) {
   private val root = graphRoot.getOrElse(evidence.source.getParent)
   private val scope = graphRoot.map(_ => "tu:" + root.relativize(evidence.source).toString + ":").getOrElse("")
   private def scoped(name: String): String = scope + name
@@ -132,7 +132,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     origin.obj.get("end").foreach(value => node.offsetEnd = Some(value.num.toInt))
   }
   private def tag(node: NewNode, name: String, value: String): Unit = {
-    val annotation = NewTag().name(name).value(value)
+    val annotation = NewTag().name(strings(name)).value(strings(value))
     add(annotation)
     builder.addEdge(node, annotation, EdgeTypes.TAGGED_BY)
   }
