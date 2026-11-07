@@ -1,12 +1,16 @@
-package io.joern.c2cpg.parser
+package io.joern.clang2cpg.parser
 
-import io.joern.c2cpg.Config
+import io.joern.clang2cpg.Config
 import java.nio.file.{Files, Path, Paths}
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
-final case class ClangEvidence(source: Path, directory: Path, document: ujson.Value) {
+final case class ClangEvidence(
+  source: Path,
+  directory: Path,
+  document: ujson.Value
+) {
   def validate(): Unit = {
     val inputs = document("inputs").obj
     require(inputs.nonEmpty, "Clang evidence lacks the source/header closure")
@@ -41,12 +45,6 @@ object ClangParser {
     require(
       Files.isRegularFile(source) && source.toString.endsWith(".c"),
       "Clang prototype requires one explicit .c translation unit; directory mode is not implemented"
-    )
-    require(
-      config.includePaths.isEmpty && config.defines.isEmpty && config.compilationDatabaseFilename.isEmpty &&
-        !config.includePathsAutoDiscovery && !config.skipFunctionBodies && !config.withPreprocessedFiles &&
-        !config.cTypeEvidence && !config.printIfDefsOnly && !config.includeComments,
-      "Clang prototype takes its complete build configuration from --clang-command; conflicting options are unsupported"
     )
     def required(value: Option[String], option: String): Path =
       Paths

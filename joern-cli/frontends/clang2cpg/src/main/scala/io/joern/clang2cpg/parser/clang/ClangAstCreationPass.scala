@@ -1,6 +1,6 @@
-package io.joern.c2cpg.parser.clang
+package io.joern.clang2cpg.parser.clang
 
-import io.joern.c2cpg.parser.ClangEvidence
+import io.joern.clang2cpg.parser.ClangEvidence
 import io.shiftleft.codepropertygraph.generated.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.passes.CpgPass

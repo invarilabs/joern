@@ -1,6 +1,6 @@
-package io.joern.c2cpg.parser
+package io.joern.clang2cpg.parser
 
-import io.joern.c2cpg.{C2Cpg, Config, Frontend}
+import io.joern.clang2cpg.{Clang2Cpg, Config, Frontend}
 import io.joern.x2cpg.X2Cpg
 import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes.TypeDecl
@@ -40,7 +40,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
   }
   private def withGraph(code: String)(test: (Cpg, Path) => Unit): Unit = {
     val (directory, config) = setup(code)
-    val graph               = new C2Cpg().createCpg(config).get
+    val graph               = new Clang2Cpg().createCpg(config).get
     try {
       X2Cpg.applyDefaultOverlays(graph)
       test(graph, directory)
@@ -346,7 +346,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       val graph = Cpg.empty
       try {
         val failure = intercept[Exception] {
-          new io.joern.c2cpg.parser.clang.ClangAstCreationPass(graph, native).createAndApply()
+          new io.joern.clang2cpg.parser.clang.ClangAstCreationPass(graph, native).createAndApply()
         }
         Iterator
           .iterate(failure: Throwable)(_.getCause)
@@ -360,7 +360,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       val (directory, config) =
         setup("#define SCALAR int\nextern int shared; int read(void) {SCALAR copied=shared; return copied;}")
       def identities(configuration: Config): List[String] = {
-        val graph = new C2Cpg().createCpg(configuration).get
+        val graph = new Clang2Cpg().createCpg(configuration).get
         try
           graph.tag
             .filter(tag => Set("clang.declarationMacro", "clang.declarationIdentity")(tag.name))
@@ -490,19 +490,19 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     }
     "reject invalid compiler input and retain the diagnostics" in {
       val (directory, config) = setup("int invalid(void) {int *p=1.5; return missing_name;}")
-      val result              = new C2Cpg().createCpg(config)
+      val result              = new Clang2Cpg().createCpg(config)
       result.isFailure shouldBe true
       Files.readString(directory.resolve("evidence/compiler.log")) should include("error:")
     }
     "reject unsupported executable syntax instead of emitting UNKNOWN or dropping it" in {
       val (_, config) = setup("void unsupported(void) {asm volatile (\"\");}")
-      val failure     = new C2Cpg().createCpg(config).failed.get
+      val failure     = new Clang2Cpg().createCpg(config).failed.get
       failure.toString should include("Unsupported Clang")
     }
     "bind imported enumerators inside the selected source method" in {
       val (directory, config) = setup("#include \"mode.h\"\nint read(void) {return WAITING;}")
       Files.writeString(directory.resolve("mode.h"), "enum Mode {WAITING=3};")
-      val graph = new C2Cpg().createCpg(config).get
+      val graph = new Clang2Cpg().createCpg(config).get
       try {
         val targets = graph.identifier.nameExact("WAITING").refOut.l
         targets.size shouldBe 1
@@ -513,7 +513,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       val (directory, config) = setup("#include \"nested/../value.h\"\nint read(void) {return VALUE;}")
       Files.createDirectory(directory.resolve("nested"))
       Files.writeString(directory.resolve("value.h"), "#define VALUE 3\n")
-      val graph = new C2Cpg().createCpg(config).get
+      val graph = new Clang2Cpg().createCpg(config).get
       try graph.file.name.l.foreach(name => Paths.get(name).normalize().toString shouldBe name)
       finally graph.close()
     }
@@ -523,13 +523,13 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
         directory.resolve("helper.h"),
         "static inline int helper(void); static inline int helper(void) {int temporary=1; return temporary;}"
       )
-      val graph = new C2Cpg().createCpg(config).get
+      val graph = new Clang2Cpg().createCpg(config).get
       try graph.member.nameExact("temporary").size shouldBe 0
       finally graph.close()
     }
     "reject unsupported array fillers rather than dropping initialized elements" in {
       val (_, config) = setup("int values[4]={1}; int read(void) {return values[0];}")
-      val failure     = new C2Cpg().createCpg(config).failed.get
+      val failure     = new Clang2Cpg().createCpg(config).failed.get
       Iterator
         .iterate(failure: Throwable)(_.getCause)
         .takeWhile(_ != null)
@@ -549,7 +549,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       val graph = Cpg.empty
       try {
         val error = intercept[Exception] {
-          new io.joern.c2cpg.parser.clang.ClangAstCreationPass(graph, native).createAndApply()
+          new io.joern.clang2cpg.parser.clang.ClangAstCreationPass(graph, native).createAndApply()
         }
         Iterator
           .iterate(error: Throwable)(_.getCause)
@@ -563,7 +563,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       val source    = directory.resolve("sample.c")
       Files.writeString(source, "int value(void) {return 1;}")
       val failure =
-        new C2Cpg().createCpg(Config().withInputPath(source.toString).copy(parserBackend = "clang")).failed.get
+        new Clang2Cpg().createCpg(Config().withInputPath(source.toString).copy(parserBackend = "clang")).failed.get
       failure.getMessage should include("--clang-command")
     }
   }

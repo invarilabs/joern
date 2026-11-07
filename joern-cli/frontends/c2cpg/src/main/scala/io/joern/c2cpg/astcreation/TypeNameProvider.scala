@@ -2,7 +2,6 @@ package io.joern.c2cpg.astcreation
 
 import org.apache.commons.lang3.StringUtils
 import org.eclipse.cdt.core.dom.ast.*
-import org.eclipse.cdt.core.dom.ILinkage
 import org.eclipse.cdt.core.dom.ast.cpp.*
 import org.eclipse.cdt.core.dom.ast.gnu.c.ICASTKnRFunctionDeclarator
 import org.eclipse.cdt.internal.core.dom.parser.cpp.*
@@ -11,7 +10,6 @@ import org.eclipse.cdt.internal.core.model.ASTStringUtil
 
 import scala.annotation.nowarn
 import scala.util.Try
-import scala.util.control.NonFatal
 
 object TypeNameProvider {
 
@@ -24,53 +22,6 @@ trait TypeNameProvider { this: AstCreator =>
 
   import FullNameProvider.*
   import TypeNameProvider.TypeLike
-
-  protected def hasCTypeEvidence: Boolean =
-    config.cTypeEvidence && cdtAst.getLinkage.getLinkageID == ILinkage.C_LINKAGE_ID
-  private lazy val cTypeIdentity = new CTypeIdentity
-
-  protected def cDeclarationName(specifier: IASTDeclSpecifier): Option[String] = {
-    if (hasCTypeEvidence) cTypeIdentity.declarationName(specifier) else None
-  }
-
-  protected def cDeclaredTypeName(nativeType: IType): Option[String] = {
-    if (hasCTypeEvidence) cTypeIdentity.typeName(nativeType) else None
-  }
-
-  private def cDeclaredTypeForName(name: IASTName): Option[String] = {
-    if (!hasCTypeEvidence) None
-    else
-      name.resolveBinding() match {
-        case variable: IVariable       => cDeclaredTypeName(variable.getType)
-        case alias: ITypedef           => cDeclaredTypeName(alias.getType)
-        case record: ICompositeType    => Some(cTypeIdentity.recordName(record))
-        case enumeration: IEnumeration => Some(cTypeIdentity.enumerationName(enumeration))
-        case _                         => None
-      }
-  }
-
-  protected def requiredCExpressionType(expression: IASTExpression): String = {
-    try {
-      val nativeType = expression.getExpressionType
-      val typeName   = cDeclaredTypeName(nativeType) match {
-        case Some(recordType) => recordType
-        case None             => safeGetTypeInternal(nativeType)
-      }
-      if (typeName == Defines.Any || typeName.isEmpty) {
-        throw new CTypeEvidenceException(s"unresolved expression type: ${expression.getRawSignature}")
-      }
-      registerType(typeName)
-    } catch {
-      case evidence: CTypeEvidenceException =>
-        val location = expression.getFileLocation
-        val site     =
-          if (location == null) expression.getContainingFilename
-          else s"${location.getFileName}:${location.getStartingLineNumber}"
-        throw new CTypeEvidenceException(s"$site: ${expression.getRawSignature}: ${evidence.getMessage}", evidence)
-      case NonFatal(cause) =>
-        throw new CTypeEvidenceException(s"cannot resolve expression: ${expression.getRawSignature}", cause)
-    }
-  }
 
   // Sadly, there is no predefined List / Enum of this within Eclipse CDT:
   private val ReservedKeywordsAtTypes: List[String] =
@@ -145,10 +96,6 @@ trait TypeNameProvider { this: AstCreator =>
           case None             => ASTStringUtil.getSimpleName(s.getName)
         }
       case s: IASTEnumerationSpecifier =>
-        cDeclarationName(s) match {
-          case Some(declaredType) => declaredType
-          case None               => ASTStringUtil.getReturnTypeString(s, null)
-        }
         parentDeclaratorAt(s, index) match {
           case Some(parentDecl) => pointersAsString(s, parentDecl)
           case None             => ASTStringUtil.getSimpleName(s.getName)
@@ -199,10 +146,7 @@ trait TypeNameProvider { this: AstCreator =>
 
   protected def safeGetType(tpe: IType): String = {
     // In case of unresolved includes etc. this may fail throwing an unrecoverable exception
-    cDeclaredTypeName(tpe) match {
-      case Some(recordType) => recordType
-      case None             => safeCdtCall(safeGetTypeInternal(tpe)).getOrElse(Defines.Any)
-    }
+    safeCdtCall(safeGetTypeInternal(tpe)).getOrElse(Defines.Any)
   }
 
   protected def safeGetExpressionType(expr: IASTExpression): String = {
@@ -272,20 +216,13 @@ trait TypeNameProvider { this: AstCreator =>
     typeLike match {
       case _: IASTElaboratedTypeSpecifier =>
         val name_     = shortName(typeLike)
-        val fullName_ = registerType(cDeclarationName(typeLike.asInstanceOf[IASTDeclSpecifier]) match {
-          case Some(recordType) => recordType
-          case None             => cleanType(fullName(typeLike))
-        })
+        val fullName_ = registerType(cleanType(fullName(typeLike)))
         TypeFullNameInfo(name_, fullName_)
       case e: IASTEnumerationSpecifier =>
         val name_                            = shortName(e)
         val fullName_                        = fullName(e)
         val (uniqueName, uniqueNameFullName) = scopeLocalUniqueName(name_, fullName_, "enum")
-        val resolvedName                     = cDeclarationName(e) match {
-          case Some(declaredType) => declaredType
-          case None               => uniqueNameFullName
-        }
-        TypeFullNameInfo(uniqueName, resolvedName)
+        TypeFullNameInfo(uniqueName, uniqueNameFullName)
       case n: ICPPASTNamespaceDefinition =>
         val name = shortName(n) match {
           case ""    => "<anonymous>"
@@ -294,15 +231,11 @@ trait TypeNameProvider { this: AstCreator =>
         val fullName_ = fullName(n)
         TypeFullNameInfo(name, scopeLocalUniqueNamespaceFullName(fullName_))
       case s: IASTCompositeTypeSpecifier =>
-        val displayName = cleanType(fullName(s))
-        val fullName_   = registerType(cDeclarationName(s) match {
-          case Some(recordType) => recordType
-          case None             => displayName
-        })
-        val name_ = shortName(s) match {
-          case name if name.isEmpty && displayName.contains(".") => displayName.substring(displayName.lastIndexOf("."))
-          case name if name.isEmpty                              => displayName
-          case other                                             => other
+        val fullName_ = registerType(cleanType(fullName(s)))
+        val name_     = shortName(s) match {
+          case name if name.isEmpty && fullName_.contains(".") => fullName_.substring(fullName_.lastIndexOf("."))
+          case name if name.isEmpty                            => fullName_
+          case other                                           => other
         }
         TypeFullNameInfo(name_, fullName_)
     }
@@ -360,32 +293,19 @@ trait TypeNameProvider { this: AstCreator =>
       case id: IASTIdExpression             => typeForIASTName(id.getName)
       case d: IASTDeclarator                => typeForIASTName(d.getName)
       case f: IASTFieldReference            => safeGetType(f.getFieldOwner.getExpressionType)
-      case s: IASTNamedTypeSpecifier        =>
-        cDeclaredTypeForName(s.getName) match {
-          case Some(recordType) => recordType
-          case None             => ASTStringUtil.getReturnTypeString(s, null)
-        }
-      case s: IASTCompositeTypeSpecifier =>
-        cDeclarationName(s) match {
-          case Some(recordType) => recordType
-          case None             => ASTStringUtil.getReturnTypeString(s, null)
-        }
-      case s: IASTEnumerationSpecifier    => ASTStringUtil.getReturnTypeString(s, null)
-      case s: IASTElaboratedTypeSpecifier => ASTStringUtil.getReturnTypeString(s, null)
-      case l: IASTLiteralExpression       => safeGetType(l.getExpressionType)
-      case e: IASTExpression              => safeGetNodeType(e)
-      case d: IASTSimpleDeclaration       => typeForDeclSpecifier(d.getDeclSpecifier)
-      case _                              => getNodeSignature(node)
+      case s: IASTNamedTypeSpecifier        => ASTStringUtil.getReturnTypeString(s, null)
+      case s: IASTCompositeTypeSpecifier    => ASTStringUtil.getReturnTypeString(s, null)
+      case s: IASTEnumerationSpecifier      => ASTStringUtil.getReturnTypeString(s, null)
+      case s: IASTElaboratedTypeSpecifier   => ASTStringUtil.getReturnTypeString(s, null)
+      case l: IASTLiteralExpression         => safeGetType(l.getExpressionType)
+      case e: IASTExpression                => safeGetNodeType(e)
+      case d: IASTSimpleDeclaration         => typeForDeclSpecifier(d.getDeclSpecifier)
+      case _                                => getNodeSignature(node)
     }
     cleanType(tpeString)
   }
 
-  private def typeForIASTName(name: IASTName): String = cDeclaredTypeForName(name) match {
-    case Some(recordType) => recordType
-    case None             => legacyTypeForIASTName(name)
-  }
-
-  private def legacyTypeForIASTName(name: IASTName): String = {
+  private def typeForIASTName(name: IASTName): String = {
     safeGetBinding(name) match {
       case Some(v: IVariable) =>
         v.getType match {
@@ -529,14 +449,7 @@ trait TypeNameProvider { this: AstCreator =>
   }
 
   @nowarn
-  private def typeForIASTArrayDeclarator(array: IASTArrayDeclarator): String = cDeclaredTypeForName(
-    array.getName
-  ) match {
-    case Some(recordType) => recordType
-    case None             => legacyTypeForIASTArrayDeclarator(array)
-  }
-
-  private def legacyTypeForIASTArrayDeclarator(a: IASTArrayDeclarator): String = {
+  private def typeForIASTArrayDeclarator(a: IASTArrayDeclarator): String = {
     import org.eclipse.cdt.core.dom.ast.ASTSignatureUtil.getNodeSignature
     val nodeType = safeGetNodeType(a)
     if (nodeType.startsWith("? ")) {

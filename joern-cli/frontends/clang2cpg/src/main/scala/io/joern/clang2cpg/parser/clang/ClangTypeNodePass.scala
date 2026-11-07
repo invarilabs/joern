@@ -1,4 +1,4 @@
-package io.joern.c2cpg.parser.clang
+package io.joern.clang2cpg.parser.clang
 
 import io.joern.x2cpg.passes.frontend.TypeNodePass
 import io.shiftleft.codepropertygraph.generated.Cpg
