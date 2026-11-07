@@ -47,6 +47,16 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "preserve compiler alignment queries with typed type and expression operands" in {
+      withGraph("unsigned long type_alignment(void){return _Alignof(int);} unsigned long expression_alignment(int value){return __alignof__(value);}") { (graph, _) =>
+        val queries = graph.call.nameExact("<operator>.alignOf").toList
+        queries.size shouldBe 2
+        queries.foreach(_.argument.size shouldBe 1)
+        graph.method.nameExact("type_alignment").ast.isTypeRef.code.toList shouldBe List("int")
+        graph.method.nameExact("expression_alignment").ast.isIdentifier.name.toList should contain("value")
+        queries.foreach(query => query.typeFullName should not be "ANY")
+      }
+    }
     "keep declaration documentation separate from executable initializer values" in {
       withGraph("int read(void) { /*** local documentation ***/\n int value=3; return value; }") { (graph, _) =>
         graph.local.nameExact("value").size shouldBe 1

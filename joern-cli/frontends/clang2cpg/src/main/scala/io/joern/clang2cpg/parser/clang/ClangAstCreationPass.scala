@@ -655,7 +655,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         require(operands.size == 3, "Clang conditional requires three operands")
         call(original, Operators.conditional, operands.map(expression))
       case "UnaryExprOrTypeTraitExpr" =>
-        require(original("name").str == "sizeof", "Only sizeof type-trait is supported by the Clang prototype")
+        val operation = original("name").str match {
+          case "sizeof" => Operators.sizeOf
+          case "alignof" | "__alignof" => "<operator>.alignOf"
+          case other => throw new IllegalArgumentException("Unsupported Clang unary type trait: " + other)
+        }
         val arguments = original.obj.get("argType") match {
           case Some(_) =>
             require(operands.isEmpty, "Clang sizeof type operand has unexpected executable children")
@@ -667,7 +671,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           case None =>
             require(operands.size == 1, "Clang sizeof requires one unevaluated expression"); operands.map(expression)
         }
-        call(original, Operators.sizeOf, arguments)
+        call(original, operation, arguments)
       case "CXXMemberCallExpr" =>
         require(operands.nonEmpty, "Clang C++ member call lacks callee")
         val callee = unwrap(operands.head)
