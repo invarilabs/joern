@@ -47,6 +47,20 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "preserve atomic operand roles and source argument order" in {
+      withGraph("int *ptr(void); int value(void); int order(void); int update(void){return __atomic_fetch_add(ptr(),value(),order());}") { (graph, _) =>
+        val atomic = graph.call.nameExact("<operator>.atomic.__atomic_fetch_add").head
+        atomic.argument.argumentIndex(1).isCall.name.toList shouldBe List("ptr")
+        atomic.argument.argumentIndex(2).isCall.name.toList shouldBe List("value")
+        atomic.argument.argumentIndex(3).isCall.name.toList shouldBe List("order")
+        atomic.typeFullName shouldBe "int"
+        atomic._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.atomic"
+          case _ => false
+        } shouldBe true
+      }
+    }
+
     "emit predefined strings from the compiler literal value" in {
       withGraph("const char *named(void){return __func__;} const char *pretty(void){return __PRETTY_FUNCTION__;}") { (graph, _) =>
         val values = graph.literal.toList.filter(node => node._taggedByOut.exists {

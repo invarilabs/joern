@@ -526,6 +526,18 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val target = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
         add(target)
         call(original, Operators.cast, Seq(target, expression(operands.head)))
+      case "AtomicExpr" =>
+        val operation = info(original)("atomic")
+        require(operation("name").str == original("name").str, "Clang atomic operation witnesses disagree")
+        val expressions = operands.groupBy(identity)
+        val values = operation("operands").arr.toSeq.map { operand =>
+          val candidates = expressions.getOrElse(operand("expression").str, Seq.empty)
+          require(candidates.size == 1, "Clang atomic operand is missing or ambiguous: " + operand("role").str)
+          expression(candidates.head)
+        }
+        val result = call(original, "<operator>.atomic." + operation("name").str, values)
+        tag(result, "clang.atomic", ujson.write(operation))
+        result
       case "PredefinedExpr" =>
         val facts = info(original)
         require(facts.obj.contains("string_literal"), "Clang predefined expression lacks its compiler literal value")

@@ -276,6 +276,141 @@ public:
     return false;
   }
 };
+// AtomicExpr stores normalized operands. Reconstruct source API argument order
+// from the pinned compiler operation enums, matching Sema::BuildAtomicExpr.
+llvm::json::Object atomicEvidence(const AtomicExpr *Atomic) {
+  enum class Form { Init, Load, LoadCopy, Value, Exchange, C11Compare, GNUCompare };
+  Form Shape;
+  switch (Atomic->getOp()) {
+  case AtomicExpr::AO__c11_atomic_init:
+  case AtomicExpr::AO__opencl_atomic_init:
+    Shape = Form::Init; break;
+  case AtomicExpr::AO__c11_atomic_load:
+  case AtomicExpr::AO__opencl_atomic_load:
+  case AtomicExpr::AO__hip_atomic_load:
+  case AtomicExpr::AO__atomic_load_n:
+  case AtomicExpr::AO__scoped_atomic_load_n:
+  case AtomicExpr::AO__atomic_test_and_set:
+  case AtomicExpr::AO__atomic_clear:
+    Shape = Form::Load; break;
+  case AtomicExpr::AO__atomic_load:
+  case AtomicExpr::AO__scoped_atomic_load:
+    Shape = Form::LoadCopy; break;
+  case AtomicExpr::AO__c11_atomic_store:
+  case AtomicExpr::AO__opencl_atomic_store:
+  case AtomicExpr::AO__hip_atomic_store:
+  case AtomicExpr::AO__atomic_store:
+  case AtomicExpr::AO__atomic_store_n:
+  case AtomicExpr::AO__scoped_atomic_store:
+  case AtomicExpr::AO__scoped_atomic_store_n:
+  case AtomicExpr::AO__c11_atomic_exchange:
+  case AtomicExpr::AO__hip_atomic_exchange:
+  case AtomicExpr::AO__opencl_atomic_exchange:
+  case AtomicExpr::AO__atomic_exchange_n:
+  case AtomicExpr::AO__scoped_atomic_exchange_n:
+  case AtomicExpr::AO__atomic_fetch_add:
+  case AtomicExpr::AO__atomic_fetch_and:
+  case AtomicExpr::AO__atomic_fetch_max:
+  case AtomicExpr::AO__atomic_fetch_min:
+  case AtomicExpr::AO__atomic_fetch_nand:
+  case AtomicExpr::AO__atomic_fetch_or:
+  case AtomicExpr::AO__atomic_fetch_sub:
+  case AtomicExpr::AO__atomic_fetch_xor:
+  case AtomicExpr::AO__atomic_add_fetch:
+  case AtomicExpr::AO__atomic_and_fetch:
+  case AtomicExpr::AO__atomic_max_fetch:
+  case AtomicExpr::AO__atomic_min_fetch:
+  case AtomicExpr::AO__atomic_nand_fetch:
+  case AtomicExpr::AO__atomic_or_fetch:
+  case AtomicExpr::AO__atomic_sub_fetch:
+  case AtomicExpr::AO__atomic_xor_fetch:
+  case AtomicExpr::AO__scoped_atomic_fetch_add:
+  case AtomicExpr::AO__scoped_atomic_fetch_and:
+  case AtomicExpr::AO__scoped_atomic_fetch_max:
+  case AtomicExpr::AO__scoped_atomic_fetch_min:
+  case AtomicExpr::AO__scoped_atomic_fetch_nand:
+  case AtomicExpr::AO__scoped_atomic_fetch_or:
+  case AtomicExpr::AO__scoped_atomic_fetch_sub:
+  case AtomicExpr::AO__scoped_atomic_fetch_xor:
+  case AtomicExpr::AO__scoped_atomic_add_fetch:
+  case AtomicExpr::AO__scoped_atomic_and_fetch:
+  case AtomicExpr::AO__scoped_atomic_max_fetch:
+  case AtomicExpr::AO__scoped_atomic_min_fetch:
+  case AtomicExpr::AO__scoped_atomic_nand_fetch:
+  case AtomicExpr::AO__scoped_atomic_or_fetch:
+  case AtomicExpr::AO__scoped_atomic_sub_fetch:
+  case AtomicExpr::AO__scoped_atomic_xor_fetch:
+  case AtomicExpr::AO__c11_atomic_fetch_add:
+  case AtomicExpr::AO__c11_atomic_fetch_and:
+  case AtomicExpr::AO__c11_atomic_fetch_max:
+  case AtomicExpr::AO__c11_atomic_fetch_min:
+  case AtomicExpr::AO__c11_atomic_fetch_or:
+  case AtomicExpr::AO__c11_atomic_fetch_sub:
+  case AtomicExpr::AO__c11_atomic_fetch_xor:
+  case AtomicExpr::AO__opencl_atomic_fetch_add:
+  case AtomicExpr::AO__opencl_atomic_fetch_and:
+  case AtomicExpr::AO__opencl_atomic_fetch_max:
+  case AtomicExpr::AO__opencl_atomic_fetch_min:
+  case AtomicExpr::AO__opencl_atomic_fetch_or:
+  case AtomicExpr::AO__opencl_atomic_fetch_sub:
+  case AtomicExpr::AO__opencl_atomic_fetch_xor:
+  case AtomicExpr::AO__hip_atomic_fetch_add:
+  case AtomicExpr::AO__hip_atomic_fetch_and:
+  case AtomicExpr::AO__hip_atomic_fetch_max:
+  case AtomicExpr::AO__hip_atomic_fetch_min:
+  case AtomicExpr::AO__hip_atomic_fetch_or:
+  case AtomicExpr::AO__hip_atomic_fetch_sub:
+  case AtomicExpr::AO__hip_atomic_fetch_xor:
+  case AtomicExpr::AO__c11_atomic_fetch_nand:
+    Shape = Form::Value; break;
+  case AtomicExpr::AO__atomic_exchange:
+  case AtomicExpr::AO__scoped_atomic_exchange:
+    Shape = Form::Exchange; break;
+  case AtomicExpr::AO__c11_atomic_compare_exchange_strong:
+  case AtomicExpr::AO__c11_atomic_compare_exchange_weak:
+  case AtomicExpr::AO__hip_atomic_compare_exchange_strong:
+  case AtomicExpr::AO__hip_atomic_compare_exchange_weak:
+  case AtomicExpr::AO__opencl_atomic_compare_exchange_strong:
+  case AtomicExpr::AO__opencl_atomic_compare_exchange_weak:
+    Shape = Form::C11Compare; break;
+  case AtomicExpr::AO__atomic_compare_exchange:
+  case AtomicExpr::AO__atomic_compare_exchange_n:
+  case AtomicExpr::AO__scoped_atomic_compare_exchange:
+  case AtomicExpr::AO__scoped_atomic_compare_exchange_n:
+    Shape = Form::GNUCompare; break;
+  default:
+    llvm::report_fatal_error(llvm::Twine("Clang CPG: unsupported atomic operand form: ") + Atomic->getOpAsString());
+  }
+  llvm::json::Array Operands;
+  std::set<const Expr *> Captured;
+  auto Add = [&](llvm::StringRef Role, const Expr *Expression) {
+    if (!Expression) llvm::report_fatal_error("Clang CPG: atomic operand is missing");
+    if (!Captured.insert(Expression).second)
+      llvm::report_fatal_error("Clang CPG: atomic source operand has ambiguous repeated AST identity");
+    Operands.push_back(llvm::json::Object{{"role", Role.str()}, {"expression", identity(Expression)}});
+  };
+  Add("pointer", Atomic->getPtr());
+  switch (Shape) {
+  case Form::Init: Add("value", Atomic->getVal1()); break;
+  case Form::Load: Add("order", Atomic->getOrder()); break;
+  case Form::LoadCopy:
+    Add("result", Atomic->getVal1()); Add("order", Atomic->getOrder()); break;
+  case Form::Value:
+    Add("value", Atomic->getVal1()); Add("order", Atomic->getOrder()); break;
+  case Form::Exchange:
+    Add("value", Atomic->getVal1()); Add("result", Atomic->getVal2()); Add("order", Atomic->getOrder()); break;
+  case Form::C11Compare:
+  case Form::GNUCompare:
+    Add("expected", Atomic->getVal1()); Add("desired", Atomic->getVal2());
+    if (Shape == Form::GNUCompare) Add("weak", Atomic->getWeak());
+    Add("order", Atomic->getOrder()); Add("failure_order", Atomic->getOrderFail()); break;
+  }
+  if (Atomic->getScopeModel()) Add("scope", Atomic->getScope());
+  if (Operands.size() != Atomic->getNumSubExprs())
+    llvm::report_fatal_error(llvm::Twine("Clang CPG: atomic operand coverage differs from compiler layout: ") + Atomic->getOpAsString());
+  return llvm::json::Object{{"op_code", static_cast<int64_t>(Atomic->getOp())},
+                           {"name", Atomic->getOpAsString().str()}, {"operands", std::move(Operands)}};
+}
 class Visitor : public RecursiveASTVisitor<Visitor> {
   ASTContext &Context; Evidence &Output;
   std::set<const Expr *> AssertionMessages;
@@ -388,6 +523,7 @@ public:
         Entry["semantic_type"] = semanticType(Expression->getType(), Context);
       }
     }
+    if (auto Atomic = dyn_cast<AtomicExpr>(Statement)) Entry["atomic"] = atomicEvidence(Atomic);
     if (auto Selection = dyn_cast<GenericSelectionExpr>(Statement)) {
       if (Selection->isResultDependent())
         llvm::report_fatal_error("Clang CPG: generic selection has a dependent result association");
