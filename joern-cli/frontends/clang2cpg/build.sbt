@@ -17,6 +17,13 @@ lazy val clang2cpg = (project in file("."))
       require(jars.nonEmpty, "Stock Joern runtime classpath is empty")
       jars.classpath
     },
+    Test / unmanagedJars += {
+      given xsbti.FileConverter = fileConverter.value
+      val runtime = file(sys.env.getOrElse("JOERN_RUNTIME", sys.error("Set JOERN_RUNTIME")))
+      val stock = runtime / "frontends" / "c2cpg" / "lib" / "io.joern.c2cpg-4.0.662.jar"
+      require(stock.isFile, s"Missing pinned stock c2cpg for compatibility tests: $stock")
+      Seq(stock).classpath.head
+    },
     libraryDependencies += "org.scalatest" %% "scalatest" % "3.2.18" % Test,
     Test / fork := false
   )
