@@ -131,7 +131,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
 
     "preserve atomic operand roles and source argument order" in {
       withGraph("int *ptr(void); int value(void); int order(void); int update(void){return __atomic_fetch_add(ptr(),value(),order());}") { (graph, _) =>
-        val atomic = graph.call.nameExact("<operator>.atomic.__atomic_fetch_add").head
+        val atomic = graph.call.nameExact("__atomic_fetch_add").head
         atomic.argument.argumentIndex(1).isCall.name.toList shouldBe List("ptr")
         atomic.argument.argumentIndex(2).isCall.name.toList shouldBe List("value")
         atomic.argument.argumentIndex(3).isCall.name.toList shouldBe List("order")

@@ -1,7 +1,6 @@
-package io.joern.clang2cpg.parser.memory
+package io.joern.clang2cpg.parser.clang
 
-import io.joern.clang2cpg.parser.clang.{ClangStringPool, ClangTagPool}
-
+import io.joern.clang2cpg.parser.memory.{NativeGraphEvidence, NativeValue, NObj, NArr, NStr, NNum, NBool}
 
 import io.shiftleft.codepropertygraph.generated.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
@@ -11,7 +10,7 @@ import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
 /** Native Clang syntax to CPG. Unsupported executable shapes abort graph creation. */
-class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false, embedNativeEvidence: Boolean = true, strings: ClangStringPool = new ClangStringPool, tags: ClangTagPool = new ClangTagPool) extends CpgPass(graph) {
+class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false, embedNativeEvidence: Boolean = true, strings: ClangStringPool = new ClangStringPool, tags: ClangTagPool = new ClangTagPool, macroSites: Option[ClangMacroSites] = None) extends CpgPass(graph) {
   private val root = graphRoot.getOrElse(evidence.source.getParent)
   private val scope = graphRoot.map(_ => "tu:" + root.relativize(evidence.source).toString + ":").getOrElse("")
   private def scoped(name: String): String = scope + name
@@ -112,7 +111,7 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
   private def index(node: NativeValue): Unit = {
     if (kind(node).endsWith("Decl") && node.obj.contains("id"))
       declarations.get(identity(node)) match {
-        case Some(previous) => require(previous == node, "Conflicting native declaration record: " + identity(node))
+        case Some(previous) => NativeDeclarationShape.requireEquivalent(previous, node)
         case None           => declarations(identity(node)) = node
       }
     children(node).foreach(index)
@@ -435,6 +434,13 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
       unwrap(children(original).head)
     } else original
   }
+  private def genericCallSelections(node: NativeValue): Seq[NativeValue] = kind(node) match {
+    case "GenericSelectionExpr" => Seq(info(node)("generic_selection")) ++ genericCallSelections(selectedGeneric(node))
+    case "ImplicitCastExpr" | "ParenExpr" =>
+      require(children(node).size == 1, "Clang call wrapper requires exactly one callee")
+      genericCallSelections(children(node).head)
+    case _ => Seq.empty
+  }
   private val activeMacros                                     = mutable.Set.empty[Int]
   private def expression(original: NativeValue): ExpressionNew = {
     val origin      = info(original)
@@ -457,7 +463,9 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
         throw new IllegalArgumentException("Clang macro lacks compiler definition evidence")
       )
       val name           = invocation("name").str
-      val definitionFile = graphFilename(definition("file").str)
+      val definitionFile =
+        if (definition.obj.get("compiler_generated").exists(_.bool)) "<compiler>"
+        else graphFilename(definition("file").str)
       val canonicalMacroName = "clang:macro:" + definitionFile + ":" + definition(
         "offset"
       ).num.toLong + ":" + name + ":expansion:" + offset.get
@@ -523,7 +531,7 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
         tag(result, "clang.implicitConversion", NativeValue.write(conversion))
         tag(result, "clang.castKind", original("castKind").str)
         result
-      case "CStyleCastExpr" =>
+      case "CStyleCastExpr" | "CompoundLiteralExpr" =>
         require(operands.size == 1, "Clang cast requires one child")
         val target = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
         add(target)
@@ -558,7 +566,7 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
           require(candidates.size == 1, "Clang atomic operand is missing or ambiguous: " + operand("role").str)
           expression(candidates.head)
         }
-        val result = call(original, "<operator>.atomic." + operation("name").str, values)
+        val result = call(original, operation("name").str, values)
         tag(result, "clang.atomic", NativeValue.write(operation))
         result
       case "PredefinedExpr" =>
@@ -704,6 +712,7 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
           result.methodFullName = target.fullName
           result.signature = target.signature
           preserveCallDeclaration(result, target)
+          genericCallSelections(operands.head).foreach(value => tag(result, "clang.genericSelection", NativeValue.write(value)))
           result
         } else {
           val result = call(original, "<operator>.pointerCall", operands.tail.map(expression))
@@ -742,7 +751,6 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
             result
         }
       case "ImplicitValueInitExpr" => call(original, "<operator>.implicitValueInit", Seq.empty)
-      case "CompoundLiteralExpr"   => call(original, "<operator>.compoundLiteral", operands.map(expression))
       case other                   =>
         throw new IllegalArgumentException(
           s"Unsupported Clang expression $other in ${filename(original)}:${info(original).obj.get("line")}: ${text(original)}"
@@ -839,7 +847,7 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
               ast(control, root, index + 1 + nestedIndex)
               if (index == conditionIndex) builder.addEdge(control, root, EdgeTypes.CONDITION)
               val role = (kind(original), index) match {
-                case ("IfStmt", 1) | ("WhileStmt", 1) => Some(EdgeTypes.TRUE_BODY)
+                case ("IfStmt", 1) | ("WhileStmt", 1) | ("SwitchStmt", 1) => Some(EdgeTypes.TRUE_BODY)
                 case ("IfStmt", 2)                    => Some(EdgeTypes.FALSE_BODY)
                 case ("DoStmt", 0)                    => Some(EdgeTypes.DO_BODY)
                 case ("ForStmt", 0)                   => Some(EdgeTypes.FOR_INIT)
@@ -847,7 +855,8 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
                 case ("ForStmt", 4)                   => Some(EdgeTypes.FOR_BODY)
                 case _                                => None
               }
-              role.foreach(label => builder.addEdge(control, root, label))
+              role.filterNot(label => label == EdgeTypes.FOR_INIT && root.isInstanceOf[NewLocal])
+                .foreach(label => builder.addEdge(control, root, label))
             }
           }
         }
@@ -1057,23 +1066,28 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
         throw new IllegalArgumentException(s"Clang assembly goto target missing: $target"))
       builder.addEdge(origin, destination, EdgeTypes.CFG)
     }
-    tag(
-      namespace(graphFilename(evidence.source.toString)),
-      "clang.translationUnit",
-      NativeValue.write(
-        NObj(
-          "schema_version" -> 2,
-          "source"         -> evidence.source.toString,
-          "function_bodies" -> !skipFunctionBodies,
-          "inputs"         -> document("inputs"),
-          "tools"   -> NObj.from(evidence.tools.toSeq.map { case (key, value) => key -> NStr(value) }),
-          "tool_aliases" -> NObj.from(evidence.toolAliases.toSeq.map { case (key, value) => key -> NStr(value) }),
-          "command" -> NArr.from(evidence.command.map(NStr(_))),
-          "macro_sites"      -> document("macros"),
-          "macro_directives" -> document("macro_directives")
-        )
-      )
+    val contract = NObj(
+      "schema_version" -> 2,
+      "source" -> evidence.source.toString,
+      "function_bodies" -> !skipFunctionBodies,
+      "inputs" -> document("inputs"),
+      "tools" -> NObj.from(evidence.tools.toSeq.map { case (key, value) => key -> NStr(value) }),
+      "tool_aliases" -> NObj.from(evidence.toolAliases.toSeq.map { case (key, value) => key -> NStr(value) }),
+      "command" -> NArr.from(evidence.command.map(NStr(_))),
+      "macro_directives" -> document("macro_directives")
     )
+    val owner = namespace(graphFilename(evidence.source.toString))
+    macroSites match {
+      case Some(shared) =>
+        val references = shared.register(document("macros").arr.toSeq)
+        references.map(_.str).distinct.foreach { identity =>
+          tag(owner, "clang.macroSite:" + identity, shared.value(identity))
+        }
+        contract.obj("macro_sites_storage") = NStr("shared-tags-sha256-v1")
+        contract.obj("macro_site_refs") = NArr.from(references)
+      case None => contract.obj("macro_sites") = document("macros")
+    }
+    tag(owner, "clang.translationUnit", NativeValue.write(contract))
     document.obj.get("include_search").foreach(value =>
       tag(namespace(graphFilename(evidence.source.toString)), "clang.includeSearch", NativeValue.write(value)))
     document.obj.get("comments").foreach(_.arr.foreach { original =>
@@ -1081,7 +1095,11 @@ class NativeAstCreationPass(graph: Cpg, evidence: NativeGraphEvidence, graphRoot
         .lineNumber(original("line").num.toInt).columnNumber(original("column").num.toInt)
       ast(namespace(graphFilename(original("file").str)), comment, 0)
     })
-    require(!embedNativeEvidence, "In-memory frontend does not serialize or archive AST evidence")
+    if (embedNativeEvidence) {
+      val payload = evidence.legacyPayload.getOrElse(throw new IllegalArgumentException(
+        "Native evidence embedding requires an explicitly supplied legacy payload producer"))()
+      tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", payload)
+    }
     // Ownership is allocated after executable nodes, preserving source-local IDs.
     emitted.toVector.filterNot(node => node.isInstanceOf[NewTag] || node.isInstanceOf[NewFile]).foreach(node =>
       tag(node, "clang.translationUnitSource", evidence.source.toString)

@@ -22,10 +22,23 @@ object NativeBenchmark {
       case other => throw new IllegalArgumentException("Unknown benchmark scope: " + other)
     }
     val graphRoot = if (Files.isDirectory(root)) root else root.getParent
-    val timings = mutable.ArrayBuffer.empty[NativeCpg.Timing]
+    val timings = new mutable.ArrayBuffer[NativeCpg.Timing] {
+      override def addOne(value: NativeCpg.Timing): this.type = {
+        super.addOne(value)
+        val runtime = Runtime.getRuntime
+        val progress = ujson.Obj("completed" -> size, "total" -> inputs.size, "source" -> value.source,
+          "native_seconds" -> value.nativeSeconds, "graph_seconds" -> value.graphSeconds,
+          "heap_used_bytes" -> (runtime.totalMemory() - runtime.freeMemory()).toDouble,
+          "heap_committed_bytes" -> runtime.totalMemory().toDouble)
+        Files.writeString(output.resolve("progress.jsonl"), ujson.write(progress) + "\n",
+          java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
+        println(ujson.write(progress))
+        this
+      }
+    }
     val started = System.nanoTime()
     try {
-      val graph = NativeCpg.create(inputs, graphRoot, output.resolve("source.cpg.bin"), Path.of(arguments(3)), timings, repository).get
+      val graph = NativeCpg.create(inputs, graphRoot, output.resolve("source.cpg.bin"), Path.of(arguments(3)), timings, repository, workers = Runtime.getRuntime.availableProcessors()).get
       try X2Cpg.applyDefaultOverlays(graph) finally graph.close()
       val report = ujson.Obj("status" -> "graph_ready", "source_count" -> inputs.size,
         "graph_seconds" -> ((System.nanoTime() - started).toDouble / 1e9),

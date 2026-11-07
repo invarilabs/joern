@@ -10,8 +10,10 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/AST/Stmt.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/TypeLoc.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/TypeTraits.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -88,6 +90,8 @@ public:
   void integer(jobject Object, llvm::StringRef Name, int64_t Value) { put(Object, Name, number(Value)); }
   void flag(jobject Object, llvm::StringRef Name, bool Value) { put(Object, Name, boolean(Value)); }
 };
+
+#include "ClangDeclarationClosure.h"
 
 class CompilerMaps {
   JavaValues &Java;
@@ -298,63 +302,21 @@ public:
     ActiveDeclarations.erase(Declaration); WrittenDeclarations.insert(Declaration);
     return Frame.keep(Result);
   }
-  jobject statement(const Stmt *Statement) {
-    LocalFrame Frame(Java.environment());
-    if (!Statement) fail("required statement is null");
-    jobject Result = Java.object(); Java.text(Result, "id", identifier(Statement)); Java.text(Result, "kind", Statement->getStmtClassName());
-    jobject Info = location(Statement->getSourceRange()); jobject Children = Java.list();
-    if (const auto *Expression = dyn_cast<Expr>(Statement)) sourceType(Result, Info, Expression->getType());
-    if (const auto *Reference = dyn_cast<DeclRefExpr>(Statement)) Java.put(Result, "referencedDecl", reference(Reference->getDecl()));
-    if (const auto *Member = dyn_cast<MemberExpr>(Statement)) {
-      Java.text(Result, "referencedMemberDecl", identifier(Member->getMemberDecl())); Java.text(Result, "name", Member->getMemberNameInfo().getAsString()); Java.flag(Result, "isArrow", Member->isArrow());
-    }
-    if (const auto *Binary = dyn_cast<BinaryOperator>(Statement)) Java.text(Result, "opcode", Binary->getOpcodeStr());
-    if (const auto *Unary = dyn_cast<UnaryOperator>(Statement)) { Java.text(Result, "opcode", UnaryOperator::getOpcodeStr(Unary->getOpcode())); Java.flag(Result, "isPostfix", Unary->isPostfix()); }
-    if (const auto *Cast = dyn_cast<CastExpr>(Statement)) Java.text(Result, "castKind", Cast->getCastKindName());
-    if (const auto *Integer = dyn_cast<IntegerLiteral>(Statement)) {
-      llvm::SmallString<64> Digits; Integer->getValue().toString(Digits, 10, Integer->getType()->isSignedIntegerType()); Java.text(Result, "value", Digits.str());
-    }
-    if (const auto *Character = dyn_cast<CharacterLiteral>(Statement)) Java.integer(Result, "value", Character->getValue());
-    if (const auto *Floating = dyn_cast<FloatingLiteral>(Statement)) {
-      llvm::SmallString<64> Digits; Floating->getValue().toString(Digits); Java.text(Result, "value", Digits.str());
-    }
-    if (const auto *Literal = dyn_cast<StringLiteral>(Statement)) {
-      std::string Spelling; llvm::raw_string_ostream Stream(Spelling); Literal->printPretty(Stream, nullptr, Context.getPrintingPolicy()); Stream.flush();
-      Java.text(Info, "compiler_literal_spelling", Spelling); Java.text(Result, "value", Spelling);
-      jobject String = Java.object(), Units = Java.list(); Java.integer(String, "unit_width", Literal->getCharByteWidth());
-      for (unsigned Index = 0; Index < Literal->getLength(); ++Index) Java.add(Units, Java.number(Literal->getCodeUnit(Index)));
-      Java.put(String, "units", Units); Java.put(Info, "string_literal", String);
-    }
-    if (const auto *Call = dyn_cast<CallExpr>(Statement)) if (const auto *Callee = Call->getDirectCallee()) Java.text(Info, "direct_callee_usr", declarationUsr(Callee));
-    if (const auto *Jump = dyn_cast<GotoStmt>(Statement)) Java.text(Result, "targetLabelDeclId", identifier(Jump->getLabel()));
-    if (const auto *Label = dyn_cast<LabelStmt>(Statement)) { Java.text(Result, "declId", identifier(Label->getDecl())); Java.text(Result, "name", Label->getName()); }
-    if (const auto *Trait = dyn_cast<UnaryExprOrTypeTraitExpr>(Statement)) {
-      Java.text(Result, "name", getTraitSpelling(Trait->getKind()));
-      if (Trait->isArgumentType()) { jobject Type = Java.object(); Java.text(Type, "qualType", Trait->getArgumentType().getAsString(Context.getPrintingPolicy())); Java.put(Result, "argType", Type); Java.text(Info, "operand_type", typeName(Trait->getArgumentType())); }
-    }
-    if (const auto *Declarations = dyn_cast<DeclStmt>(Statement)) {
-      for (const Decl *Declaration : Declarations->decls()) Java.add(Children, declaration(Declaration));
-    } else {
-      switch (Statement->getStmtClass()) {
-      case Stmt::CompoundStmtClass: case Stmt::ReturnStmtClass: case Stmt::IfStmtClass: case Stmt::GotoStmtClass: case Stmt::LabelStmtClass:
-      case Stmt::NullStmtClass: case Stmt::DeclRefExprClass: case Stmt::MemberExprClass: case Stmt::CallExprClass:
-      case Stmt::BinaryOperatorClass: case Stmt::CompoundAssignOperatorClass: case Stmt::UnaryOperatorClass:
-      case Stmt::ImplicitCastExprClass: case Stmt::CStyleCastExprClass: case Stmt::IntegerLiteralClass: case Stmt::FloatingLiteralClass:
-      case Stmt::CharacterLiteralClass: case Stmt::StringLiteralClass: case Stmt::ParenExprClass: case Stmt::ArraySubscriptExprClass:
-      case Stmt::ConditionalOperatorClass: case Stmt::UnaryExprOrTypeTraitExprClass:
-        for (const Stmt *Child : Statement->children()) if (Child) Java.add(Children, statement(Child));
-        break;
-      default: fail(std::string("unsupported executable compiler syntax ") + Statement->getStmtClassName());
-      }
-    }
-    Java.put(Result, "inner", Children); Java.put(Nodes, identifier(Statement), Info); WrittenStatements.insert(Statement);
-    return Frame.keep(Result);
-  }
+#include "ClangJniSyntax.h"
+
   jobject translationUnit() {
     LocalFrame Frame(Java.environment()); jobject Root = Java.object(), Children = Java.list();
     Java.text(Root, "id", identifier(Context.getTranslationUnitDecl())); Java.text(Root, "kind", "TranslationUnitDecl");
     Java.put(Nodes, identifier(Context.getTranslationUnitDecl()), Java.object());
-    for (const Decl *Declaration : Context.getTranslationUnitDecl()->decls()) Java.add(Children, declaration(Declaration));
+    ClangDeclarationClosure Required(Context);
+    for (const Decl *Declaration : Context.getTranslationUnitDecl()->decls())
+      if (Required.contains(Declaration)) Java.add(Children, declaration(Declaration));
+    for (const Decl *Declaration : Required.ordered()) {
+      if (!WrittenDeclarations.count(Declaration) && Declaration->getDeclContext()->isTranslationUnit())
+        Java.add(Children, declaration(Declaration));
+    }
+    for (const Decl *Declaration : Required.ordered())
+      if (!WrittenDeclarations.count(Declaration)) fail("required compiler declaration was not emitted: " + std::string(Declaration->getDeclKindName()));
     Java.put(Root, "inner", Children); return Frame.keep(Root);
   }
   jobject inputs() {
@@ -405,6 +367,9 @@ public:
     SourceManager &Manager = Processor.getSourceManager();
     if (Macro->getDefinitionLoc().isValid() && Macro->getDefinitionEndLoc().isValid()) {
       jobject Definition = range(SourceRange(Macro->getDefinitionLoc(), Macro->getDefinitionEndLoc()));
+      SourceLocation DefinitionLocation = Manager.getSpellingLoc(Macro->getDefinitionLoc());
+      Java.flag(Definition, "compiler_generated", Manager.isWrittenInBuiltinFile(DefinitionLocation) ||
+        Manager.isWrittenInCommandLineFile(DefinitionLocation));
       SourceLocation Begin = Manager.getSpellingLoc(Macro->getDefinitionLoc()); llvm::StringRef Buffer = Manager.getBufferData(Manager.getFileID(Begin));
       unsigned Offset = Manager.getFileOffset(Begin); auto Newline = Buffer.rfind('\n', Offset); unsigned Start = Newline == llvm::StringRef::npos ? 0 : Newline + 1;
       SourceLocation Last = Manager.getExpansionLoc(Macro->getDefinitionEndLoc()); unsigned End = Manager.getFileOffset(Lexer::getLocForEndOfToken(Last, 0, Manager, Processor.getLangOpts()));

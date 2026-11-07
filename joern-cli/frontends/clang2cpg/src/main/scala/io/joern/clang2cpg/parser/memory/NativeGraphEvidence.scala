@@ -3,9 +3,9 @@ package io.joern.clang2cpg.parser.memory
 import java.nio.file.{Files, Path}
 import java.security.MessageDigest
 
-/** An owned in-memory compiler snapshot. Never constructed from an AST dump. */
+/** An owned typed compiler snapshot; only the explicit legacy adapter supplies a serialized payload. */
 final case class NativeGraphEvidence(source: Path, document: NativeValue, command: Seq[String],
-  tools: Map[String, String], toolAliases: Map[String, String]) {
+  tools: Map[String, String], toolAliases: Map[String, String], legacyPayload: Option[() => String] = None) {
   def validate(): Unit = document("inputs").obj.foreach { case (name, expected) =>
     val path = Path.of(name)
     require(Files.isRegularFile(path), "Native compiler input disappeared: " + name)

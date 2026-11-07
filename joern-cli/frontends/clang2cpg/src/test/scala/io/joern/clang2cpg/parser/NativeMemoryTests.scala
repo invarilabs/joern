@@ -56,16 +56,16 @@ class NativeMemoryTests extends AnyWordSpec with Matchers {
         physicalFiles should contain(name)
       }
     }
-    "reject valid unsupported syntax instead of dropping its behavior" in {
+    "reject unsupported compiler configuration instead of selecting another parser" in {
       val native = ClangNative.load(Paths.get(sys.env("CLANG_CPG_JNI_LIBRARY")))
-      val directory = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "jni-unsupported-")
-      val source = directory.resolve("loop.c")
-      Files.writeString(source, "int count(void){int value=0;for(int i=0;i<3;i++){value+=i;}return value;}\n")
-      val failure = intercept[IllegalArgumentException] {
-        native.parse(Seq(sys.env("CLANG_CPG_COMPILER"), "-std=gnu11", source.toString), directory)
+      val directory = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "jni-unsupported-option-")
+      val source = directory.resolve("sample.c")
+      Files.writeString(source, "int value(void){return 1;}\n")
+      intercept[IllegalArgumentException] {
+        native.parse(Seq(sys.env("CLANG_CPG_COMPILER"), "-finvari-deliberately-unsupported-option", source.toString), directory)
       }
-      failure.getMessage should include("unsupported executable compiler syntax ForStmt")
     }
+
     "fail when the explicitly selected library is missing" in {
       val directory = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "clang-jni-missing-")
       intercept[IllegalArgumentException] { ClangNative.load(directory.resolve("missing.so")) }

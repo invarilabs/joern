@@ -1,8 +1,8 @@
 package io.joern.clang2cpg.parser.memory
 
 import io.joern.clang2cpg.Config
-import io.joern.clang2cpg.parser.ClangInput
-import io.joern.clang2cpg.parser.clang.{ClangStringPool, ClangTagPool, ClangInterTuLinkPass, ClangTypeNodePass}
+import io.joern.clang2cpg.parser.{ClangInput, ClangCaptures}
+import io.joern.clang2cpg.parser.clang.{ClangStringPool, ClangTagPool, ClangInterTuLinkPass, ClangTypeNodePass, ClangAstEmitter, ClangMacroSites}
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
 import io.joern.x2cpg.passes.frontend.MetaDataPass
 import io.shiftleft.codepropertygraph.generated.{Cpg, Languages}
@@ -14,7 +14,8 @@ import scala.util.Try
 object NativeCpg {
   final case class Timing(source: String, nativeSeconds: Double, graphSeconds: Double)
   def create(inputs: Seq[ClangInput], root: Path, output: Path, library: Path,
-    timings: mutable.Buffer[Timing], repository: Boolean): Try[Cpg] = {
+    timings: mutable.Buffer[Timing], repository: Boolean, workers: Int = 1): Try[Cpg] = {
+    require(workers > 0, "Native capture worker count must be positive")
     require(inputs.nonEmpty, "Native CPG requires explicitly selected translation units")
     require(inputs.map(_.source).distinct.size == inputs.size, "Duplicate native translation unit")
     val native = ClangNative.load(library)
@@ -23,12 +24,14 @@ object NativeCpg {
       new MetaDataPass(graph, Languages.NEWC, root.toString).createAndApply()
       val strings = new ClangStringPool
       val tags = new ClangTagPool
+      val macroSites = new ClangMacroSites
       val bindings = mutable.LinkedHashMap.empty[String, String]
       val closure = mutable.LinkedHashMap.empty[String, String]
-      inputs.foreach { input =>
+      ClangCaptures.foreach(inputs, workers) { input =>
         val started = System.nanoTime()
         val document = native.parse(input.command, input.directory)
-        val nativeSeconds = (System.nanoTime() - started).toDouble / 1e9
+        document -> ((System.nanoTime() - started).toDouble / 1e9)
+      } { case (input, (document, nativeSeconds)) =>
         val paths = Seq(library.toAbsolutePath.normalize(), Path.of(input.command.head), input.source)
         val aliases = paths.map(path => path.toString -> path.toRealPath().toString).toMap
         val tools = paths.map(path => path.toRealPath().toString -> NativeGraphEvidence.digest(path.toRealPath())).toMap
@@ -39,8 +42,8 @@ object NativeCpg {
           closure(name) = digest.str
         }
         val graphStart = System.nanoTime()
-        val syntax = new NativeAstCreationPass(graph, evidence, if (repository) Some(root) else None,
-          includeFileContent = true, embedNativeEvidence = false, strings = strings, tags = tags)
+        val syntax = new ClangAstEmitter(graph, evidence, if (repository) Some(root) else None,
+          includeFileContent = true, embedNativeEvidence = false, strings = strings, tags = tags, macroSites = Some(macroSites))
         syntax.createAndApply()
         syntax.publishTags()
         syntax.sourceTypeBindings.foreach { case (name, identity) =>
