@@ -59,6 +59,37 @@ object ClangParser {
     digest.digest().map(value => f"${value & 0xff}%02x").mkString
   }
 
+  /** Completed compiler outputs and their immutable provenance, with no parsed JSON retained. */
+  final case class DiskCapture private[parser] (
+    source: Path,
+    directory: Path,
+    selectedCommand: Seq[String],
+    private[parser] val protectedInputs: Seq[ProtectedInput],
+    private[parser] val artifactHashes: Seq[(Path, String)],
+    private[parser] val commandHash: String,
+    private[parser] val embedNativeEvidence: Boolean
+  )
+
+  private def validateDisk(capture: DiskCapture): Unit = {
+    capture.protectedInputs.foreach(_.validate())
+    val expectedArtifacts = Seq(capture.directory.resolve("clang.json")) ++
+      (if (capture.embedNativeEvidence) Seq(capture.directory.resolve("compiler-types.ast"), capture.directory.resolve("clang.json.tokens")) else Seq.empty)
+    require(capture.artifactHashes.map(_._1) == expectedArtifacts,
+      "Clang disk capture artifact closure is incomplete; prepare fresh evidence")
+    val command = capture.directory.resolve("command.json")
+    require(Files.isRegularFile(command) && digest(command) == capture.commandHash,
+      s"Clang capture command changed: $command; prepare fresh evidence")
+    capture.artifactHashes.foreach { case (path, expected) =>
+      require(Files.isRegularFile(path) && Files.size(path) > 0 && digest(path) == expected,
+        s"Clang capture artifact changed: $path; prepare fresh evidence")
+    }
+    if (!capture.embedNativeEvidence) {
+      require(!Files.exists(capture.directory.resolve("compiler-types.ast")) &&
+        !Files.exists(capture.directory.resolve("clang.json.tokens")),
+        "Direct CPG capture unexpectedly emitted legacy evidence; correct the producer")
+    }
+  }
+
   /** Runs one explicitly configured native frontend. A compiler failure never selects CDT. */
   def capture(config: Config): ClangEvidence = {
     val inputs = ClangInputs.plan(config)
@@ -66,7 +97,11 @@ object ClangParser {
     capture(inputs.head, ClangInputs.plugin(config), ClangInputs.evidenceDirectory(config), config)
   }
 
-  def capture(input: ClangInput, plugin: Path, directory: Path, config: Config): ClangEvidence = {
+  def capture(input: ClangInput, plugin: Path, directory: Path, config: Config): ClangEvidence =
+    load(captureToDisk(input, plugin, directory, config))
+
+  /** Native prefetch stage: execute and verify disk outputs without loading any JSON document. */
+  def captureToDisk(input: ClangInput, plugin: Path, directory: Path, config: Config): DiskCapture = {
     val source = input.source
     val selected = input.command
     require(!Files.exists(directory), s"Clang evidence path already exists: $directory; select a new directory")
@@ -101,6 +136,7 @@ object ClangParser {
       Option.when(config.logPreprocessor)("log-preprocessor")
     ).flatten.flatMap(value => Seq("-Xclang", "-plugin-arg-clang-cpg", "-Xclang", value)) :+ source.toString
     Files.writeString(directory.resolve("command.json"), ujson.write(command, indent = 2))
+    val commandHash = digest(directory.resolve("command.json"))
     val started = System.nanoTime()
     val process = new ProcessBuilder(command.asJava)
       .directory(input.directory.toFile)
@@ -132,34 +168,45 @@ object ClangParser {
       s"Clang frontend failed or did not emit complete evidence; inspect ${directory.resolve("compiler.log")}"
     )
     protectedInputs.foreach(_.validate())
-    val document = readDocument(Files.newInputStream(documentPath))
-    require(
-      document("schema_version").num == 1 && document("ast")("kind").str == "TranslationUnitDecl",
-      "Clang exporter returned an unsupported or incomplete schema; use the matching exporter"
-    )
-    if (!config.embedNativeEvidence) {
-      require(document.obj.get("direct_cpg_only").contains(ujson.Bool(true)), "Clang exporter did not honor direct-cpg-only; use the matching exporter")
-      require(!document.obj.contains("compiler_graph") && !document.obj.contains("tokens") &&
-        !Files.exists(directory.resolve("compiler-types.ast")) && !Files.exists(directory.resolve("clang.json.tokens")),
-        "Direct CPG capture unexpectedly emitted legacy evidence; correct the producer")
-    }
     val artifacts = Seq(documentPath) ++ (if (config.embedNativeEvidence) Seq(directory.resolve("compiler-types.ast"), directory.resolve("clang.json.tokens")) else Seq.empty)
     artifacts.foreach(path =>
-      require(
-        Files.isRegularFile(path) && Files.size(path) > 0,
-        s"Clang did not emit required native evidence: $path; rebuild with the matching exporter"
-      )
+      require(Files.isRegularFile(path) && Files.size(path) > 0,
+        s"Clang did not emit required native evidence: $path; rebuild with the matching exporter")
     )
+    val capture = DiskCapture(source, directory, selected, protectedInputs,
+      artifacts.map(path => path -> digest(path)), commandHash, config.embedNativeEvidence)
+    validateDisk(capture)
+    capture
+  }
+
+  /** Ordered graph stage: hold one JSON DOM, verify its closure, then publish the completed receipt. */
+  def load(capture: DiskCapture): ClangEvidence = {
+    val source = capture.source
+    val directory = capture.directory
+    val documentPath = directory.resolve("clang.json")
+    require(!Files.exists(directory.resolve("receipt.json")),
+      s"Clang capture already has a receipt: $directory; use a fresh capture")
+    validateDisk(capture)
+    val document = readDocument(Files.newInputStream(documentPath))
+    require(document("schema_version").num == 1 && document("ast")("kind").str == "TranslationUnitDecl",
+      "Clang exporter returned an unsupported or incomplete schema; use the matching exporter")
+    if (!capture.embedNativeEvidence) {
+      require(document.obj.get("direct_cpg_only").contains(ujson.Bool(true)),
+        "Clang exporter did not honor direct-cpg-only; use the matching exporter")
+      require(!document.obj.contains("compiler_graph") && !document.obj.contains("tokens"),
+        "Direct CPG capture unexpectedly emitted legacy evidence; correct the producer")
+    }
     val evidence = ClangEvidence(source, directory, document)
     evidence.validate()
+    validateDisk(capture)
     val receipt = ujson.Obj(
-      "parser" -> "clang", "source" -> source.toString, "selected_command" -> ujson.Arr.from(selected),
-      "artifacts" -> ujson.Obj.from(artifacts.map(path => path.getFileName.toString -> ujson.Str(digest(path)))),
-      "command_sha256" -> digest(directory.resolve("command.json")), "evidence_sha256" -> digest(documentPath),
-      "tools" -> ujson.Obj.from(protectedInputs.map(item => item.target.toString -> ujson.Str(item.sha256))),
-      "tool_aliases" -> ujson.Obj.from(protectedInputs.map(item => item.alias.toString -> ujson.Str(item.target.toString)))
+      "parser" -> "clang", "source" -> source.toString, "selected_command" -> ujson.Arr.from(capture.selectedCommand),
+      "artifacts" -> ujson.Obj.from(capture.artifactHashes.map { case (path, hash) => path.getFileName.toString -> ujson.Str(hash) }),
+      "command_sha256" -> capture.commandHash, "evidence_sha256" -> capture.artifactHashes.head._2,
+      "tools" -> ujson.Obj.from(capture.protectedInputs.map(item => item.target.toString -> ujson.Str(item.sha256))),
+      "tool_aliases" -> ujson.Obj.from(capture.protectedInputs.map(item => item.alias.toString -> ujson.Str(item.target.toString)))
     )
-    if (!config.embedNativeEvidence) receipt("inputs") = document("inputs")
+    if (!capture.embedNativeEvidence) receipt("inputs") = document("inputs")
     Files.writeString(directory.resolve("receipt.json"), ujson.write(receipt, indent = 2))
     evidence
   }

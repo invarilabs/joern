@@ -25,9 +25,14 @@ object ClangCpg {
       ClangCaptures.foreach(inputs.zipWithIndex, config.clangWorkers) { case (input, index) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
         val started = System.nanoTime()
-        val evidence = ClangParser.capture(input, plugin, captureDirectory, config)
-        (evidence, (System.nanoTime() - started).toDouble / 1e9)
-      } { case ((input, index), (evidence, captureSeconds)) =>
+        val capture = ClangParser.captureToDisk(input, plugin, captureDirectory, config)
+        (capture, (System.nanoTime() - started).toDouble / 1e9)
+      } { case ((input, index), (capture, diskSeconds)) =>
+        // Prefetch holds completed files and hashes, never a second parsed AST.
+        val loadStarted = System.nanoTime()
+        val evidence = ClangParser.load(capture)
+        val loadSeconds = (System.nanoTime() - loadStarted).toDouble / 1e9
+        val captureSeconds = diskSeconds + loadSeconds
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
         val receipt = ujson.read(Files.readString(captureDirectory.resolve("receipt.json")))
         (evidence.document("inputs").obj.toSeq ++ receipt("tools").obj.toSeq).foreach { case (path, hash) =>
@@ -53,6 +58,7 @@ object ClangCpg {
           val archive = ClangArchive.complete(captureDirectory)
           Files.writeString(directory.resolve(f"tu-$index%05d.timings.json"), ujson.write(ujson.Obj(
             "source" -> input.source.toString, "capture_seconds" -> captureSeconds,
+            "capture_disk_seconds" -> diskSeconds, "native_load_seconds" -> loadSeconds,
             "ast_seconds" -> graphSeconds, "archive_seconds" -> ((System.nanoTime() - archiveStarted).toDouble / 1e9),
             "native_json_bytes" -> ujson.Num(documentBytes.toDouble), "archive_bytes" -> ujson.Num(Files.size(archive).toDouble)
           ), indent = 2))
