@@ -1,7 +1,8 @@
 package io.joern.clang2cpg.parser
 
 import io.joern.clang2cpg.Config
-import java.nio.file.{Files, Path, Paths, FileVisitOption}
+import java.nio.file.{Files, Path, Paths, FileVisitOption, FileVisitResult, SimpleFileVisitor}
+import java.nio.file.attribute.BasicFileAttributes
 import scala.jdk.CollectionConverters.*
 import scala.collection.mutable
 
@@ -109,23 +110,39 @@ object ClangInputs {
     require(Files.isRegularFile(input) || Files.isDirectory(input), s"Input is not a source file or directory: $input")
     val root = if (Files.isDirectory(input)) input else input.getParent
     require(!(config.clangCommand.nonEmpty && config.compilationDatabaseFilename.nonEmpty), "Ambiguous compiler context: select --clang-command or --compilation-database")
-    def excluded(path: Path): Boolean = {
-      val relative = root.relativize(path).toString
-      val parts = root.relativize(path).iterator().asScala.map(_.toString).toSeq.dropRight(1)
-      parts.exists(p => p.startsWith(".") || Set("test", "tests", "CMakeFiles")(p)) ||
+    def excluded(path: Path, directory: Boolean = false): Boolean = {
+      val relative = if (path == root) path.getFileName.toString else root.relativize(path).toString
+      val parts = Paths.get(relative).iterator().asScala.map(_.toString).toSeq
+      val directories = if (directory) parts else parts.dropRight(1)
+      def matches(pattern: scala.util.matching.Regex): Boolean =
+        pattern.matches(relative) || (directory && pattern.matches(relative + java.io.File.separator))
+      parts.exists(_.startsWith(".")) || directories.exists(p => Set("test", "tests", "CMakeFiles")(p)) ||
       config.ignoredFiles.exists(name => path.startsWith(absolute(name, root))) ||
-      config.ignoredFilesRegex.matches(relative) || config.defaultIgnoredFilesRegex.exists(_.matches(relative))
+      matches(config.ignoredFilesRegex) || config.defaultIgnoredFilesRegex.exists(matches)
     }
     // Database mode selects its declared translation units, not unrelated files found by walking the repository.
     val discovered = if (Files.isRegularFile(input)) Seq(input) else if (config.compilationDatabaseFilename.nonEmpty) Seq.empty else {
-      require(Files.isDirectory(input), s"Input is not a source file or directory: $input")
-      val walk = Files.walk(input, FileVisitOption.FOLLOW_LINKS)
-      try walk.iterator().asScala.filter(Files.isRegularFile(_)).map(_.toRealPath()).toSeq finally walk.close()
+      val files = mutable.ArrayBuffer.empty[Path]
+      Files.walkFileTree(input, java.util.EnumSet.of(FileVisitOption.FOLLOW_LINKS), Int.MaxValue,
+        new SimpleFileVisitor[Path] {
+          override def preVisitDirectory(path: Path, attributes: BasicFileAttributes): FileVisitResult =
+            if (excluded(path, directory = true)) FileVisitResult.SKIP_SUBTREE else FileVisitResult.CONTINUE
+          override def visitFile(path: Path, attributes: BasicFileAttributes): FileVisitResult = {
+            if (attributes.isRegularFile && !excluded(path)) files += path.toRealPath()
+            FileVisitResult.CONTINUE
+          }
+          // SimpleFileVisitor throws traversal failures, including symlink cycles; no failed file is omitted.
+        })
+      files.toSeq
     }
-    val selected = discovered.distinct.filterNot(excluded).filter { p =>
+    val candidates = discovered.distinct.filterNot(path => excluded(path)).filter { p =>
       sources(extension(p)) || headers(extension(p)) || (config.withPreprocessedFiles && extension(p) == "i")
-    }.filterNot { p =>
-      Files.isDirectory(input) && config.compilationDatabaseFilename.isEmpty && config.withPreprocessedFiles && extension(p) != "i" && Files.isRegularFile(p.resolveSibling(p.getFileName.toString.replaceFirst("\\.[^.]+$", ".i")))
+    }
+    val preprocessed = candidates.filter(path => extension(path) == "i").toSet
+    val selected = candidates.filterNot { path =>
+      val sibling = path.resolveSibling(path.getFileName.toString.replaceFirst("\\.[^.]+$", ".i"))
+      Files.isDirectory(input) && config.compilationDatabaseFilename.isEmpty && config.withPreprocessedFiles &&
+        extension(path) != "i" && preprocessed(sibling)
     }.sortBy(_.toString)
     if (config.compilationDatabaseFilename.isEmpty)
       require(selected.nonEmpty, s"No selected C/C++ source or header files in $input; correct the input/exclusions")
@@ -155,7 +172,7 @@ object ClangInputs {
           }.groupBy(_._1)
           // A compilation database defines its translation units; included headers are captured in their closure.
           val translationUnits = if (Files.isDirectory(input))
-            entries.keys.toSeq.filter(_.startsWith(input)).filterNot(excluded).sortBy(_.toString)
+            entries.keys.toSeq.filter(_.startsWith(input)).filterNot(path => excluded(path)).sortBy(_.toString)
           else {
             require(!excluded(input), s"Explicit translation unit is excluded: $input; correct the exclusions")
             Seq(input)

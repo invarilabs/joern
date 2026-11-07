@@ -29,6 +29,38 @@ class ClangInputsTests extends AnyWordSpec with Matchers {
       selected.map(_.source.getFileName.toString) shouldBe Seq("a.c", "api.hpp", "z.cpp")
       selected.foreach(input => input.command.last shouldBe input.source.toString)
     }
+    "exclude hidden filenames and nested default excluded directories" in {
+      val root = directory()
+      val kept = source(root, "kept.c")
+      source(root, ".hidden.c")
+      source(root, ".private/hidden.c")
+      source(root, "nested/test/test.c")
+      source(root, "nested/tests/tests.c")
+      source(root, "nested/CMakeFiles/generated.c")
+      ClangInputs.plan(config(root)).map(_.source) shouldBe Seq(kept)
+    }
+    "prune explicitly excluded and default excluded directories before visiting cycles" in {
+      val root = directory()
+      val kept = source(root, "kept.c")
+      Seq("excluded", ".private", "test", "tests", "CMakeFiles").foreach { name =>
+        val ignored = Files.createDirectories(root.resolve(name))
+        Files.createSymbolicLink(ignored.resolve("cycle"), root)
+      }
+      ClangInputs.plan(config(root).withIgnoredFiles(Seq("excluded"))).map(_.source) shouldBe Seq(kept)
+    }
+    "fail on traversal cycles outside excluded directories" in {
+      val root = directory()
+      source(root, "kept.c")
+      Files.createSymbolicLink(root.resolve("cycle"), root)
+      intercept[java.nio.file.FileSystemLoopException] { ClangInputs.plan(config(root)) }
+    }
+    "keep the original source when its preprocessed sibling is explicitly excluded" in {
+      val root = directory()
+      val input = source(root, "a.c")
+      source(root, "a.i")
+      ClangInputs.plan(config(root).copy(withPreprocessedFiles = true).withIgnoredFiles(Seq("a.i")))
+        .map(_.source) shouldBe Seq(input)
+    }
     "prefer preprocessed input only when explicitly enabled" in {
       val root = directory()
       source(root, "a.c")
