@@ -9,6 +9,7 @@ lazy val clang2cpg = (project in file("."))
     Compile / mainClass := Some("io.joern.c2cpg.Main"),
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Werror", "-no-indent", "-old-syntax"),
     Compile / unmanagedJars := {
+      given xsbti.FileConverter = fileConverter.value
       val runtime = file(sys.env.getOrElse("JOERN_RUNTIME", sys.error("Set JOERN_RUNTIME to pinned stock Joern")))
       val directory = runtime / "frontends" / "c2cpg" / "lib"
       require(directory.isDirectory, s"Missing stock frontend libraries: $directory")
