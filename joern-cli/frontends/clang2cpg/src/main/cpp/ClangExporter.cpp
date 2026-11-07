@@ -278,10 +278,13 @@ public:
 };
 class Visitor : public RecursiveASTVisitor<Visitor> {
   ASTContext &Context; Evidence &Output;
+  std::set<const Expr *> AssertionMessages;
 public:
   Visitor(ASTContext &Value, Evidence &Destination) : Context(Value), Output(Destination) {}
   bool shouldVisitImplicitCode() const { return true; }
   bool VisitDecl(Decl *Declaration) {
+    if (auto Assertion = dyn_cast<StaticAssertDecl>(Declaration))
+      if (const auto *Message = Assertion->getMessage()) AssertionMessages.insert(Message);
     auto &Manager = Context.getSourceManager();
     auto Variable = dyn_cast<VarDecl>(Declaration);
     const bool HeaderVariable = Variable && Variable->isFileVarDecl() && Declaration->getLocation().isValid() &&
@@ -291,6 +294,12 @@ public:
     if (HeaderVariable)
       Entry["declaration_range"] = location(Declaration->getSourceRange(), Manager, Context.getLangOpts(), false);
     Entry["canonical"] = identity(Declaration->getCanonicalDecl());
+    if (auto Assertion = dyn_cast<StaticAssertDecl>(Declaration)) {
+      Entry["assertion_failed"] = Assertion->isFailed();
+      const Expr *Condition = Assertion->getAssertExpr();
+      if (!Condition) llvm::report_fatal_error("Clang CPG: static assertion lacks its condition expression");
+      Entry["assertion_dependent"] = Condition->isValueDependent() || Condition->isTypeDependent();
+    }
     if (auto Named = dyn_cast<NamedDecl>(Declaration)) Entry["name"] = Named->getNameAsString();
     if (auto Value = dyn_cast<ValueDecl>(Declaration)) {
       Entry["type"] = typeName(Value->getType(), Context);
@@ -329,6 +338,7 @@ public:
     }
     if (auto Function = dyn_cast<FunctionDecl>(Declaration)) {
       Entry["usr"] = usr(Function);
+      Entry["externally_visible"] = Function->isExternallyVisible();
       Entry["result_type"] = typeName(Function->getReturnType(), Context);
       Entry["result_spelling"] = Function->getReturnType().getAsString(Context.getPrintingPolicy());
       Entry["variadic"] = Function->isVariadic(); Entry["has_body"] = Function->doesThisDeclarationHaveABody();
@@ -367,8 +377,16 @@ public:
     if (!isa<ImplicitValueInitExpr>(Statement) && !Context.getSourceManager().isWrittenInMainFile(Context.getSourceManager().getExpansionLoc(Statement->getBeginLoc()))) return true;
     auto Entry = location(Statement->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
     if (auto Expression = dyn_cast<Expr>(Statement)) {
-      Entry["type"] = typeName(Expression->getType(), Context);
-      Entry["semantic_type"] = semanticType(Expression->getType(), Context);
+      if (Expression->getType().isNull()) {
+        if (AssertionMessages.count(Expression) && isa<StringLiteral>(Expression))
+          Entry["non_value_role"] = "static_assert_message";
+        else llvm::report_fatal_error(llvm::Twine("Clang CPG: null type on value expression ") +
+          Statement->getStmtClassName() + " at " + Entry.getString("file").value_or("<generated>") + ":" +
+          std::to_string(Entry.getInteger("line").value_or(0)) + ": " + Entry.getString("code").value_or(""));
+      } else {
+        Entry["type"] = typeName(Expression->getType(), Context);
+        Entry["semantic_type"] = semanticType(Expression->getType(), Context);
+      }
     }
     if (auto Selection = dyn_cast<GenericSelectionExpr>(Statement)) {
       if (Selection->isResultDependent())

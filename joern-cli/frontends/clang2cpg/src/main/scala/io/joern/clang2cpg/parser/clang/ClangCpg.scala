@@ -18,6 +18,7 @@ object ClangCpg {
       new MetaDataPass(graph, Languages.NEWC, root.toString).createAndApply()
       val bindings = mutable.LinkedHashMap.empty[String, String]
       val inputsAtCapture = mutable.LinkedHashMap.empty[String, String]
+      val aliasesAtCapture = mutable.LinkedHashMap.empty[String, String]
       val plugin = ClangInputs.plugin(config)
       val directory = ClangInputs.evidenceDirectory(config)
       ClangCaptures.foreach(inputs.zipWithIndex, config.clangWorkers) { case (input, index) =>
@@ -31,6 +32,10 @@ object ClangCpg {
         (evidence.document("inputs").obj.toSeq ++ receipt("tools").obj.toSeq).foreach { case (path, hash) =>
           require(!inputsAtCapture.contains(path) || inputsAtCapture(path) == hash.str, s"Clang input changed between translation units: $path")
           inputsAtCapture(path) = hash.str
+        }
+        receipt("tool_aliases").obj.foreach { case (alias, target) =>
+          require(!aliasesAtCapture.contains(alias) || aliasesAtCapture(alias) == target.str, s"Clang tool alias changed between translation units: $alias")
+          aliasesAtCapture(alias) = target.str
         }
         val graphStarted = System.nanoTime()
         val documentBytes = Files.size(captureDirectory.resolve("clang.json"))
@@ -57,6 +62,11 @@ object ClangCpg {
         require(Files.isRegularFile(path) && ClangParser.digest(path) == expected,
           s"Clang input changed during repository generation: $path; regenerate the graph")
       }
+      aliasesAtCapture.foreach { case (alias, target) =>
+        require(Files.exists(Paths.get(alias)) && Paths.get(alias).toRealPath().toString == target,
+          s"Clang tool alias changed during repository generation: $alias; regenerate the graph")
+      }
+      new ClangInterTuLinkPass(graph).createAndApply()
       new ClangTypeNodePass(graph, bindings.toMap).createAndApply()
     }
   }

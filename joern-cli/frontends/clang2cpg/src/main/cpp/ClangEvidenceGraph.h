@@ -126,6 +126,12 @@ public:
       Entry["definition"] = Record->getDefinition() ? llvm::json::Value(identity(Record->getDefinition())) : llvm::json::Value(nullptr);
     }
     if (auto Enum = dyn_cast<EnumDecl>(Declaration)) Entry["type"] = typeId(Context.getEnumType(Enum));
+    if (auto Assertion = dyn_cast<StaticAssertDecl>(Declaration)) {
+      Entry["assertion_failed"] = Assertion->isFailed();
+      const Expr *Condition = Assertion->getAssertExpr();
+      if (!Condition) llvm::report_fatal_error("Clang CPG: static assertion lacks its condition expression");
+      Entry["assertion_dependent"] = Condition->isValueDependent() || Condition->isTypeDependent();
+    }
     if (auto Function = dyn_cast<FunctionDecl>(Declaration)) {
       llvm::json::Array Arguments;
       for (auto Parameter : Function->parameters()) Arguments.push_back(identity(Parameter));
@@ -152,6 +158,23 @@ public:
     Entry["semantic_parent"] = Owners.empty() ? llvm::json::Value(nullptr) : llvm::json::Value(identity(Owners.back()));
     Entry["is_expression"] = isa<Expr>(Statement);
     if (auto Expression = dyn_cast<Expr>(Statement)) {
+      if (Expression->getType().isNull()) {
+        auto Assertion = Owners.empty() ? nullptr : dyn_cast<StaticAssertDecl>(Owners.back());
+        if (Assertion && Assertion->getMessage() == Expression && isa<StringLiteral>(Expression)) {
+          Entry.erase("type");
+          Entry["non_value_role"] = "static_assert_message";
+          const auto *Literal = cast<StringLiteral>(Expression);
+          llvm::json::Array Units;
+          for (unsigned Index = 0; Index < Literal->getLength(); ++Index)
+            Units.push_back(static_cast<int64_t>(Literal->getCodeUnit(Index)));
+          Entry["string_literal"] = llvm::json::Object{{"unit_width", Literal->getCharByteWidth()}, {"units", std::move(Units)}};
+        } else {
+          const auto &Manager = Context.getSourceManager();
+          llvm::report_fatal_error(llvm::Twine("Clang CPG: null type on legacy value expression ") +
+            Statement->getStmtClassName() + " at " + Manager.getFilename(Statement->getBeginLoc()) + ":" +
+            std::to_string(Manager.getExpansionLineNumber(Statement->getBeginLoc())));
+        }
+      } else {
       Entry["type"] = typeId(Expression->getType());
       Expr::EvalResult Result;
       if (Expression->getType()->isIntegralOrEnumerationType() && Expression->EvaluateAsInt(Result, Context)) {
@@ -159,6 +182,7 @@ public:
         llvm::SmallString<64> Digits; Value.toString(Digits, 10);
         Entry["evaluation"] = llvm::json::Object{{"kind", 1}, {"unsigned", Value.isUnsigned()}, {"value", Digits.str().str()}};
       } else Entry["evaluation"] = nullptr;
+      }
     }
     if (auto Reference = dyn_cast<DeclRefExpr>(Statement)) {
       Entry["referenced"] = identity(Reference->getDecl()); Entry["spelling"] = Reference->getDecl()->getNameAsString();

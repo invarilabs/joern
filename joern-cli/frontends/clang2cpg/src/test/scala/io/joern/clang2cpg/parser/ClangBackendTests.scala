@@ -47,6 +47,15 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "preserve compiler-checked assertions without creating runtime message values" in {
+      withGraph("_Static_assert(sizeof(int)>=2, \"int width\"); int f(void){_Static_assert(1, \"local proof\");return 1;}") { (graph, _) =>
+        val proofs = graph.tag.nameExact("clang.staticAssertion").value.toList.map(ujson.read(_))
+        proofs.size shouldBe 2
+        proofs.forall(proof => !proof("failed").bool && !proof("dependent").bool) shouldBe true
+        graph.literal.code.toList should not contain("\"local proof\"")
+      }
+    }
+
     "emit only the compiler-selected generic association without evaluating its controller" in {
       withGraph("int side(void); int f(int x) {return _Generic(side(), int:x+1, default:side());}") { (graph, _) =>
         graph.call.nameExact("side").size shouldBe 0
@@ -206,7 +215,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
         (graph, _) =>
           val contracts = graph.tag.nameExact("clang.translationUnit").value.toList
         contracts.size shouldBe 1
-        ujson.read(contracts.head)("schema_version").num shouldBe 1
+        ujson.read(contracts.head)("schema_version").num shouldBe 2
         val parameter = graph.method.nameExact("run").parameter.nameExact("box").head
         parameter._taggedByOut.collect {
           case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.semanticType" =>

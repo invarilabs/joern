@@ -18,6 +18,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   private val metadata                  = document("nodes").obj
   private val declarations              = mutable.LinkedHashMap.empty[String, ujson.Value]
   private val bindings                  = mutable.LinkedHashMap.empty[String, NewNode]
+  private val methodContracts = mutable.Map.empty[NewMethod, (String, ujson.Value)]
   private val recordOwners = mutable.Map.empty[String, NewTypeDecl]
   private val thisParameters = mutable.Map.empty[NewMethod, NewMethodParameterIn]
   private var activeThis: Option[NewMethodParameterIn] = None
@@ -303,6 +304,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .astParentFullName(scoped(filename(node) + ":<global>"))
       annotate(method, node)
       tag(method, "clang.canonicalMethodFullName", canonicalName)
+      tag(method, "clang.externallyVisible", info(node)("externally_visible").bool.toString)
+      methodContracts(method) = canonicalName -> info(node)("semantic_type")
       if (kind(node) == "CXXMethodDecl") {
         val owner = recordOwners.getOrElse(info(node)("owner_usr").str,
           throw new IllegalArgumentException("Clang C++ method lacks its owner record: " + text(node)))
@@ -356,6 +359,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       ast(method, result, children(node).count(kind(_) == "ParmVarDecl") + 2)
       node -> method
     }
+  }
+  private def preserveCallDeclaration(call: NewCall, method: NewMethod): Unit = {
+    val (identity, signature) = methodContracts.getOrElse(method,
+      throw new IllegalArgumentException("Clang direct call has no native declaration contract: " + call.code))
+    tag(call, "clang.callCanonicalMethodFullName", identity)
+    tag(call, "clang.callDeclaredFunctionType", ujson.write(signature))
   }
   private def call(original: ujson.Value, name: String, operands: Seq[ExpressionNew]): NewCall = {
     val node = NewCall()
@@ -633,6 +642,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val result = call(original, target.name, operands.tail.map(expression))
         result.methodFullName = target.fullName
         result.signature = target.signature
+        preserveCallDeclaration(result, target)
         result.dispatchType = if(info(selected)("virtual_method").bool) DispatchTypes.DYNAMIC_DISPATCH else DispatchTypes.STATIC_DISPATCH
         argument(result, receiver, 0)
         builder.addEdge(result, receiver, EdgeTypes.RECEIVER)
@@ -646,6 +656,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           val result = call(original, target.name, operands.tail.map(expression))
           result.methodFullName = target.fullName
           result.signature = target.signature
+          preserveCallDeclaration(result, target)
           result
         } else {
           val result = call(original, "<operator>.pointerCall", operands.tail.map(expression))
@@ -823,6 +834,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         labels(original("declId").str) = label
         Seq(label) ++ operands.flatMap(statements)
       case "NullStmt"                                => Seq.empty // An empty C statement has no executable operation.
+      case "StaticAssertDecl" => Seq.empty // Compiler-checked declaration, recorded separately.
       case "TypedefDecl" | "RecordDecl" | "CXXRecordDecl" | "EnumDecl" | "AccessSpecDecl" => Seq.empty // Already registered as non-executable declarations.
       case _ if metadata.get(identity(original)).exists(_.obj.contains("type")) => Seq(expression(original))
       case other => throw new IllegalArgumentException(s"Unsupported Clang statement $other: ${text(original)}")
@@ -842,6 +854,15 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       throw new IllegalArgumentException(s"Unsupported Clang declaration ${kind(node)}: ${text(node)}; native C++ graph support is required")
     }
     namespace(graphFilename(evidence.source.toString))
+    declarations.values.filter(node => kind(node) == "StaticAssertDecl" && inMain(node)).foreach { original =>
+      val failed = info(original)("assertion_failed").bool
+      val dependent = info(original)("assertion_dependent").bool
+      require(!failed && !dependent, "Clang static assertion is failed or dependent; a concrete successful assertion is required")
+      tag(namespace(filename(original)), "clang.staticAssertion", ujson.write(ujson.Obj(
+        "code" -> text(original), "failed" -> failed, "dependent" -> dependent,
+        "source" -> evidence.source.toString
+      )))
+    }
     registerTypes()
     val registeredMethods                       = registerMethods()
     val localDeclarations                       = mutable.LinkedHashSet.empty[String]
@@ -958,11 +979,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       "clang.translationUnit",
       ujson.write(
         ujson.Obj(
-          "schema_version" -> 1,
+          "schema_version" -> 2,
           "source"         -> evidence.source.toString,
           "function_bodies" -> !skipFunctionBodies,
           "inputs"         -> document("inputs"),
           "tools"   -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json")))("tools"),
+          "tool_aliases" -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json")))("tool_aliases"),
           "command" -> ujson
             .read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json")))("selected_command"),
           "macro_sites"      -> document("macros"),

@@ -152,7 +152,8 @@ object ClangParser {
       "parser" -> "clang", "source" -> source.toString, "selected_command" -> ujson.Arr.from(selected),
       "artifacts" -> ujson.Obj.from(artifacts.map(path => path.getFileName.toString -> ujson.Str(digest(path)))),
       "command_sha256" -> digest(directory.resolve("command.json")), "evidence_sha256" -> digest(documentPath),
-      "tools" -> ujson.Obj.from(protectedInputs.map(item => item.target.toString -> ujson.Str(item.sha256)))
+      "tools" -> ujson.Obj.from(protectedInputs.map(item => item.target.toString -> ujson.Str(item.sha256))),
+      "tool_aliases" -> ujson.Obj.from(protectedInputs.map(item => item.alias.toString -> ujson.Str(item.target.toString)))
     )
     if (!config.embedNativeEvidence) receipt("inputs") = document("inputs")
     Files.writeString(directory.resolve("receipt.json"), ujson.write(receipt, indent = 2))
