@@ -39,10 +39,11 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
             node.label + ":" + node.seq + ":" + node.propertyOption[String]("CODE").getOrElse("") + ":" + node.propertyOption[String]("TYPE_FULL_NAME").getOrElse("")
           )
         val expected = projection(graph)
-        val parallel = new Clang2Cpg().createCpg(config.copy(clangWorkers = 2, clangEvidenceDir = Some(root.resolve("parallel-evidence").toString))).get
+        val parallel = new Clang2Cpg().createCpg(config.copy(clangWorkers = 2, embedNativeEvidence = false, clangEvidenceDir = Some(root.resolve("parallel-evidence").toString))).get
         try {
           X2Cpg.applyDefaultOverlays(parallel)
           projection(parallel) shouldBe expected
+          parallel.tag.nameExact("clang.nativeEvidence").size shouldBe 0
         } finally parallel.close()
         val helpers = graph.method.nameExact("helper").toList
         helpers.size shouldBe 2

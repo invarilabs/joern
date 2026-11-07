@@ -160,7 +160,7 @@ llvm::json::Object semanticType(QualType Type, ASTContext &Context) {
 struct Evidence {
   llvm::json::Object Nodes;
   llvm::json::Array Macros, Tokens, Directives, ConditionalDirectives, Comments;
-  bool IncludeComments = false, LogPreprocessor = false;
+  bool IncludeComments = false, LogPreprocessor = false, EmbedLegacyPayload = true;
   std::string TokenDump;
 };
 llvm::json::Object location(SourceRange Range, SourceManager &Manager, const LangOptions &Language) {
@@ -418,28 +418,34 @@ public:
         if (*Previous != Digest) llvm::report_fatal_error("Clang CPG: canonical source input has conflicting buffer hashes");
       Inputs[PhysicalPath.str().str()] = Digest;
     }
-    std::vector<std::string> Names;
-    for (const auto &Entry : Processor.macros())
-      if (Processor.getMacroInfo(Entry.first)) Names.push_back(Entry.first->getName().str());
-    std::sort(Names.begin(), Names.end());
     llvm::json::Array MacroNames;
-    for (const auto &Name : Names) MacroNames.push_back(Name);
-    std::error_code TokenError; llvm::raw_fd_ostream TokenStream(Destination + ".tokens", TokenError);
-    if (TokenError) llvm::report_fatal_error("Clang CPG: cannot write compiler token evidence");
-    TokenStream << Output->TokenDump;
+    if (Output->EmbedLegacyPayload) {
+      std::vector<std::string> Names;
+      for (const auto &Entry : Processor.macros())
+        if (Processor.getMacroInfo(Entry.first)) Names.push_back(Entry.first->getName().str());
+      std::sort(Names.begin(), Names.end());
+      for (const auto &Name : Names) MacroNames.push_back(Name);
+      std::error_code TokenError; llvm::raw_fd_ostream TokenStream(Destination + ".tokens", TokenError);
+      if (TokenError) llvm::report_fatal_error("Clang CPG: cannot write compiler token evidence");
+      TokenStream << Output->TokenDump;
+    }
     std::error_code Error; llvm::raw_fd_ostream Stream(Destination, Error);
     if (Error) llvm::report_fatal_error(llvm::Twine("Clang CPG: cannot write evidence: ") + Error.message());
-    Stream << "{\"schema_version\":1,\"ast\":";
+    Stream << "{\"schema_version\":1";
+    if (!Output->EmbedLegacyPayload) Stream << ",\"direct_cpg_only\":true";
+    Stream << ",\"ast\":";
     Context.getTranslationUnitDecl()->dump(Stream, false, ADOF_JSON);
-    Stream << ",\"compiler_graph\":" << llvm::formatv("{0}", llvm::json::Value(NativeEvidenceGraph(Context).capture()));
+    if (Output->EmbedLegacyPayload) Stream << ",\"compiler_graph\":" << llvm::formatv("{0}", llvm::json::Value(NativeEvidenceGraph(Context).capture()));
     Stream << ",\"nodes\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Nodes)));
     Stream << ",\"macro_directives\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Directives)));
     Stream << ",\"conditional_directives\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->ConditionalDirectives)));
     Stream << ",\"comments\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Comments)));
     Stream << ",\"macros\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Macros)));
-    Stream << ",\"tokens\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Tokens)));
-    Stream << ",\"predefines\":" << llvm::formatv("{0}", llvm::json::Value(Processor.getPredefines()));
-    Stream << ",\"macro_names\":" << llvm::formatv("{0}", llvm::json::Value(std::move(MacroNames)));
+    if (Output->EmbedLegacyPayload) {
+      Stream << ",\"tokens\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Tokens)));
+      Stream << ",\"predefines\":" << llvm::formatv("{0}", llvm::json::Value(Processor.getPredefines()));
+      Stream << ",\"macro_names\":" << llvm::formatv("{0}", llvm::json::Value(std::move(MacroNames)));
+    }
     Stream << ",\"inputs\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Inputs))) << "}\n";
   }
 };
@@ -451,6 +457,7 @@ class Action : public PluginASTAction {
     for (size_t Index = 1; Index < Arguments.size(); ++Index) {
       if (Arguments[Index] == "include-comments") Output->IncludeComments = true;
       else if (Arguments[Index] == "log-preprocessor") Output->LogPreprocessor = true;
+      else if (Arguments[Index] == "direct-cpg-only") Output->EmbedLegacyPayload = false;
       else { llvm::errs() << "Clang CPG: unsupported plugin argument: " << Arguments[Index] << "\n"; return false; }
     }
     return true;
@@ -458,7 +465,7 @@ class Action : public PluginASTAction {
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &Compiler, llvm::StringRef) override {
     Preprocessor &Processor = Compiler.getPreprocessor();
     Processor.addPPCallbacks(std::make_unique<MacroEvidence>(Processor, Output));
-    Processor.setTokenWatcher([Data = Output, &Processor](const Token &Part) {
+    if (Output->EmbedLegacyPayload) Processor.setTokenWatcher([Data = Output, &Processor](const Token &Part) {
       if (Part.isAnnotation()) return;
       // Use Clang's token spelling/location APIs for the existing strict token
       // transport. This shares the parser's token stream, not another parse.

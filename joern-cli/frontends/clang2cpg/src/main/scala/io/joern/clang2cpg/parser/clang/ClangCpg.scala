@@ -24,7 +24,7 @@ object ClangCpg {
         ClangParser.capture(input, plugin, captureDirectory, config)
       } { case ((input, index), evidence) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
-        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent)
+        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent, config.embedNativeEvidence)
         syntax.createAndApply()
         syntax.sourceTypeBindings.foreach { case (key, value) =>
           require(!bindings.contains(key) || bindings(key) == value, s"Conflicting compiler type binding: $key")

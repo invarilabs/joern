@@ -9,7 +9,7 @@ import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
 /** Native Clang syntax to CPG. Unsupported executable shapes abort graph creation. */
-class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false) extends CpgPass(graph) {
+class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false, includeFileContent: Boolean = false, embedNativeEvidence: Boolean = true) extends CpgPass(graph) {
   private val root = graphRoot.getOrElse(evidence.source.getParent)
   private val scope = graphRoot.map(_ => "tu:" + root.relativize(evidence.source).toString + ":").getOrElse("")
   private def scoped(name: String): String = scope + name
@@ -618,7 +618,6 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         result.dispatchType = if(info(selected)("virtual_method").bool) DispatchTypes.DYNAMIC_DISPATCH else DispatchTypes.STATIC_DISPATCH
         argument(result, receiver, 0)
         builder.addEdge(result, receiver, EdgeTypes.RECEIVER)
-        builder.addEdge(result, target, EdgeTypes.CALL)
         result
       case "CallExpr" =>
         require(operands.nonEmpty, "Clang call lacks a callee")
@@ -807,6 +806,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   }
   override def run(diffGraph: DiffGraphBuilder): Unit = {
     builder = diffGraph
+    if (!embedNativeEvidence) require(document.obj.get("direct_cpg_only").contains(ujson.Bool(true)),
+      "Direct semantic CPG requires an explicitly selected native direct capture")
     index(document("ast"))
     declarations.values.foreach(info)
     declarations.values.filter(inMain).find(node =>
@@ -950,6 +951,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .lineNumber(original("line").num.toInt).columnNumber(original("column").num.toInt)
       ast(namespace(graphFilename(original("file").str)), comment, 0)
     })
+    if (embedNativeEvidence) {
     val nativePayload = ujson.Obj(
       "schema_version"   -> 1,
       "source"           -> evidence.source.toString,
@@ -969,6 +971,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       ujson.write(ujson.Obj("schema_version" -> 2, "encoding" -> "gzip+base64", "payload" -> java.util.Base64.getEncoder.encodeToString(bytes.toByteArray)))
     }
     tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", payload)
+    }
     // Ownership is allocated after executable nodes, preserving source-local IDs.
     emitted.toVector.filterNot(node => node.isInstanceOf[NewTag] || node.isInstanceOf[NewFile]).foreach(node =>
       tag(node, "clang.translationUnitSource", evidence.source.toString)

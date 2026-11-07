@@ -77,10 +77,8 @@ object ClangParser {
     val protectedInputs = (Seq(source, compiler, plugin) ++ input.protectedInputs).distinct.map(protect)
     Files.createDirectories(directory)
     val documentPath = directory.resolve("clang.json")
-    val command      = selected.dropRight(1) ++ Seq(
-      "-emit-ast",
-      "-o",
-      directory.resolve("compiler-types.ast").toString,
+    val action = if (config.embedNativeEvidence) Seq("-emit-ast", "-o", directory.resolve("compiler-types.ast").toString) else Seq("-fsyntax-only")
+    val command      = selected.dropRight(1) ++ action ++ Seq(
       "-Xclang",
       "-load",
       "-Xclang",
@@ -94,6 +92,7 @@ object ClangParser {
       "-Xclang",
       documentPath.toString
     ) ++ Seq(
+      Option.when(!config.embedNativeEvidence)("direct-cpg-only"),
       Option.when(config.includeComments)("include-comments"),
       Option.when(config.logPreprocessor)("log-preprocessor")
     ).flatten.flatMap(value => Seq("-Xclang", "-plugin-arg-clang-cpg", "-Xclang", value)) :+ source.toString
@@ -134,7 +133,13 @@ object ClangParser {
       document("schema_version").num == 1 && document("ast")("kind").str == "TranslationUnitDecl",
       "Clang exporter returned an unsupported or incomplete schema; use the matching exporter"
     )
-    val artifacts = Seq(documentPath, directory.resolve("compiler-types.ast"), directory.resolve("clang.json.tokens"))
+    if (!config.embedNativeEvidence) {
+      require(document.obj.get("direct_cpg_only").contains(ujson.Bool(true)), "Clang exporter did not honor direct-cpg-only; use the matching exporter")
+      require(!document.obj.contains("compiler_graph") && !document.obj.contains("tokens") &&
+        !Files.exists(directory.resolve("compiler-types.ast")) && !Files.exists(directory.resolve("clang.json.tokens")),
+        "Direct CPG capture unexpectedly emitted legacy evidence; correct the producer")
+    }
+    val artifacts = Seq(documentPath) ++ (if (config.embedNativeEvidence) Seq(directory.resolve("compiler-types.ast"), directory.resolve("clang.json.tokens")) else Seq.empty)
     artifacts.foreach(path =>
       require(
         Files.isRegularFile(path) && Files.size(path) > 0,

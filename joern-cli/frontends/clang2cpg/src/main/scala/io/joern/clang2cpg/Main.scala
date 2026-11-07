@@ -11,6 +11,7 @@ final case class Config(
   parserBackend: String = "clang",
   clangCommand: Option[String] = None,
   clangWorkers: Int = 1,
+  embedNativeEvidence: Boolean = true,
   clangCompiler: Option[String] = None,
   clangPlugin: Option[String] = None,
   clangEvidenceDir: Option[String] = None,
@@ -62,6 +63,9 @@ object Frontend {
       opt[String]("parser")
         .validate(value => if (value == "clang") success else failure("clang2cpg supports only --parser clang"))
         .action((value, config) => config.copy(parserBackend = value)),
+      opt[Unit]("clang-no-raw-payload")
+        .text("Emit the complete semantic CPG without the redundant legacy compiler graph/token/serialized-AST payload")
+        .action((_, config) => config.copy(embedNativeEvidence = false)),
       opt[Int]("clang-workers")
         .validate(value => if (value > 0) success else failure("--clang-workers must be positive"))
         .action((value, config) => config.copy(clangWorkers = value)),

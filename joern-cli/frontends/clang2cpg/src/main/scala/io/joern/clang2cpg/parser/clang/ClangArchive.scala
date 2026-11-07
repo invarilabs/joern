@@ -16,6 +16,7 @@ object ClangArchive {
     require(files.nonEmpty && files.forall(p => Files.isRegularFile(p) && !Files.isSymbolicLink(p)), s"Invalid evidence directory: $directory")
     val expected = files.map(p => p.getFileName.toString -> ClangParser.digest(p)).toMap
     val out = new ZipOutputStream(Files.newOutputStream(temporary))
+    out.setLevel(java.util.zip.Deflater.BEST_SPEED)
     try files.foreach { file =>
       out.putNextEntry(new ZipEntry(file.getFileName.toString))
       Files.copy(file, out)
