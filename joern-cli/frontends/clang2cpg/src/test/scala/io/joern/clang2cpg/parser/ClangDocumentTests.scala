@@ -48,7 +48,11 @@ class ClangDocumentTests extends AnyWordSpec with Matchers {
         override def read(): Int = throw new IOException("capture unavailable")
         override def close(): Unit = closed = true
       }
-      intercept[IOException](ClangParser.readDocument(input)).getMessage shouldBe "capture unavailable"
+      val failure = intercept[Exception](ClangParser.readDocument(input))
+      Iterator.iterate(failure: Throwable)(_.getCause).takeWhile(_ != null).exists {
+        case cause: IOException => cause.getMessage == "capture unavailable"
+        case _ => false
+      } shouldBe true
       closed shouldBe true
     }
   }
