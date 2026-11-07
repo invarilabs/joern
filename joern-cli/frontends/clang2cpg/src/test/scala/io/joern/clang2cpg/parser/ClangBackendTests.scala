@@ -50,7 +50,9 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     "retain compiler assembly-goto targets as possible CFG branches" in {
       withGraph("""int branch(void){__asm__ goto(""::::escape);return 0;escape:return 1;}""") { (graph, _) =>
         val assembly = graph.call.nameExact("<operator>.asm").head
-        assembly.cfgNext.isJumpTarget.name.toList should contain("escape")
+        assembly.cfgNext.collect {
+          case target: io.shiftleft.codepropertygraph.generated.nodes.JumpTarget => target.name
+        }.toList should contain("escape")
       }
     }
 
