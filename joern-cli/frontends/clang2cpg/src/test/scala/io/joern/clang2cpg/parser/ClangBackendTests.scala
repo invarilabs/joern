@@ -47,6 +47,21 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "emit only the compiler-selected generic association without evaluating its controller" in {
+      withGraph("int side(void); int f(int x) {return _Generic(side(), int:x+1, default:side());}") { (graph, _) =>
+        graph.call.nameExact("side").size shouldBe 0
+        graph.call.nameExact("<operator>.addition").size shouldBe 1
+        graph.tag.nameExact("clang.genericSelection").size shouldBe 1
+      }
+    }
+    "resolve generic-selected callees through compiler expression identities" in {
+      withGraph("int selected(int); int other(int); int f(int x) {return _Generic(x, int:selected, default:other)(x);}") { (graph, _) =>
+        graph.call.nameExact("selected").size shouldBe 1
+        graph.call.nameExact("other").size shouldBe 0
+        graph.call.nameExact("<operator>.pointerCall").size shouldBe 0
+      }
+    }
+
     "retain the value and source marker of GNU extension expressions" in {
       withGraph("int f(int x) {return __extension__ (x + 1);}") { (graph, _) =>
         graph.call.nameExact("<operator>.addition").size shouldBe 1

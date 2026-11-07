@@ -163,7 +163,7 @@ struct Evidence {
   bool IncludeComments = false, LogPreprocessor = false, EmbedLegacyPayload = true;
   std::string TokenDump;
 };
-llvm::json::Object location(SourceRange Range, SourceManager &Manager, const LangOptions &Language) {
+llvm::json::Object location(SourceRange Range, SourceManager &Manager, const LangOptions &Language, bool IncludeCode = true) {
   llvm::json::Object Result;
   if (Range.isInvalid()) { Result["generated"] = true; return Result; }
   SourceLocation Begin = Manager.getExpansionLoc(Range.getBegin());
@@ -177,7 +177,7 @@ llvm::json::Object location(SourceRange Range, SourceManager &Manager, const Lan
   Result["file"] = Manager.getFilename(Begin).str();
   Result["offset"] = Start; Result["end"] = End;
   Result["line"] = Manager.getSpellingLineNumber(Begin); Result["column"] = Manager.getSpellingColumnNumber(Begin);
-  Result["code"] = Buffer.slice(Start, End).str();
+  if (IncludeCode) Result["code"] = Buffer.slice(Start, End).str();
   Result["macro"] = Range.getBegin().isMacroID() || Range.getEnd().isMacroID();
   SourceLocation Spelling = Manager.getSpellingLoc(Range.getBegin());
   Result["spelling_file"] = Manager.getFilename(Spelling).str();
@@ -187,7 +187,7 @@ llvm::json::Object location(SourceRange Range, SourceManager &Manager, const Lan
     unsigned First = Manager.getFileOffset(Spelling);
     unsigned Finish = Manager.getFileOffset(Lexer::getLocForEndOfToken(SpellingLast, 0, Manager, Language));
     llvm::StringRef Physical = Manager.getBufferData(Manager.getFileID(Spelling));
-    if (First <= Finish && Finish <= Physical.size()) Result["spelling_code"] = Physical.slice(First, Finish).str();
+    if (IncludeCode && First <= Finish && Finish <= Physical.size()) Result["spelling_code"] = Physical.slice(First, Finish).str();
   }
   return Result;
 }
@@ -282,7 +282,14 @@ public:
   Visitor(ASTContext &Value, Evidence &Destination) : Context(Value), Output(Destination) {}
   bool shouldVisitImplicitCode() const { return true; }
   bool VisitDecl(Decl *Declaration) {
-    auto Entry = location(Declaration->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
+    auto &Manager = Context.getSourceManager();
+    auto Variable = dyn_cast<VarDecl>(Declaration);
+    const bool HeaderVariable = Variable && Variable->isFileVarDecl() && Declaration->getLocation().isValid() &&
+      !Manager.isWrittenInMainFile(Manager.getExpansionLoc(Declaration->getLocation()));
+    auto Entry = location(HeaderVariable ? SourceRange(Declaration->getLocation(), Declaration->getEndLoc()) :
+                          Declaration->getSourceRange(), Manager, Context.getLangOpts());
+    if (HeaderVariable)
+      Entry["declaration_range"] = location(Declaration->getSourceRange(), Manager, Context.getLangOpts(), false);
     Entry["canonical"] = identity(Declaration->getCanonicalDecl());
     if (auto Named = dyn_cast<NamedDecl>(Declaration)) Entry["name"] = Named->getNameAsString();
     if (auto Value = dyn_cast<ValueDecl>(Declaration)) {
@@ -362,6 +369,17 @@ public:
     if (auto Expression = dyn_cast<Expr>(Statement)) {
       Entry["type"] = typeName(Expression->getType(), Context);
       Entry["semantic_type"] = semanticType(Expression->getType(), Context);
+    }
+    if (auto Selection = dyn_cast<GenericSelectionExpr>(Statement)) {
+      if (Selection->isResultDependent())
+        llvm::report_fatal_error("Clang CPG: generic selection has a dependent result association");
+      const Expr *Controller = Selection->getControllingExpr();
+      if (!Controller) llvm::report_fatal_error("Clang CPG: generic selection lacks an expression controller");
+      Entry["generic_selection"] = llvm::json::Object{
+        {"selected_expression", identity(Selection->getResultExpr())},
+        {"controlling_expression", identity(Controller)},
+        {"selected_association", Selection->getResultIndex()},
+        {"controlling_expression_unevaluated", true}};
     }
     if (auto Call = dyn_cast<CXXMemberCallExpr>(Statement)) {
       const auto *Method = Call->getMethodDecl();

@@ -105,6 +105,8 @@ object ClangInputs {
 
   def plan(config: Config): Seq[ClangInput] = {
     val input = Paths.get(config.inputPath).toRealPath()
+    val processCwd = Paths.get("").toAbsolutePath.normalize()
+    require(Files.isRegularFile(input) || Files.isDirectory(input), s"Input is not a source file or directory: $input")
     val root = if (Files.isDirectory(input)) input else input.getParent
     require(!(config.clangCommand.nonEmpty && config.compilationDatabaseFilename.nonEmpty), "Ambiguous compiler context: select --clang-command or --compilation-database")
     def excluded(path: Path): Boolean = {
@@ -114,7 +116,8 @@ object ClangInputs {
       config.ignoredFiles.exists(name => path.startsWith(absolute(name, root))) ||
       config.ignoredFilesRegex.matches(relative) || config.defaultIgnoredFilesRegex.exists(_.matches(relative))
     }
-    val discovered = if (Files.isRegularFile(input)) Seq(input) else {
+    // Database mode selects its declared translation units, not unrelated files found by walking the repository.
+    val discovered = if (Files.isRegularFile(input)) Seq(input) else if (config.compilationDatabaseFilename.nonEmpty) Seq.empty else {
       require(Files.isDirectory(input), s"Input is not a source file or directory: $input")
       val walk = Files.walk(input, FileVisitOption.FOLLOW_LINKS)
       try walk.iterator().asScala.filter(Files.isRegularFile(_)).map(_.toRealPath()).toSeq finally walk.close()
@@ -122,15 +125,16 @@ object ClangInputs {
     val selected = discovered.distinct.filterNot(excluded).filter { p =>
       sources(extension(p)) || headers(extension(p)) || (config.withPreprocessedFiles && extension(p) == "i")
     }.filterNot { p =>
-      config.withPreprocessedFiles && extension(p) != "i" && Files.isRegularFile(p.resolveSibling(p.getFileName.toString.replaceFirst("\\.[^.]+$", ".i")))
+      Files.isDirectory(input) && config.compilationDatabaseFilename.isEmpty && config.withPreprocessedFiles && extension(p) != "i" && Files.isRegularFile(p.resolveSibling(p.getFileName.toString.replaceFirst("\\.[^.]+$", ".i")))
     }.sortBy(_.toString)
-    require(selected.nonEmpty, s"No selected C/C++ source or header files in $input; correct the input/exclusions")
+    if (config.compilationDatabaseFilename.isEmpty)
+      require(selected.nonEmpty, s"No selected C/C++ source or header files in $input; correct the input/exclusions")
     config.clangCommand match {
       case Some(name) =>
         require(Files.isRegularFile(input), "--clang-command requires one explicitly selected file")
         require(config.includePaths.isEmpty && config.defines.isEmpty,
           "--clang-command already defines the exact argv; put include/define options in that JSON")
-        val file = existing(name, root)
+        val file = existing(name, processCwd)
         val words = ujson.read(Files.readString(file)).arr.toSeq.map(_.str)
         require(words.size >= 2 && words.last == input.toString, "Clang command must end with the exact selected absolute source path")
         require(Paths.get(words.head).isAbsolute, "Clang command requires an explicit absolute compiler executable")
@@ -138,7 +142,7 @@ object ClangInputs {
         Seq(ClangInput(input, words, root, Seq(file)))
       case None => config.compilationDatabaseFilename match {
         case Some(name) =>
-          val database = existing(name, root)
+          val database = existing(name, processCwd)
           val entries = ujson.read(Files.readString(database)).arr.toSeq.map { entry =>
             val cwd = existing(entry("directory").str, database.getParent)
             require(Files.isDirectory(cwd), s"Compilation database working directory is missing: $cwd")
@@ -150,7 +154,12 @@ object ClangInputs {
             (source, cwd, words)
           }.groupBy(_._1)
           // A compilation database defines its translation units; included headers are captured in their closure.
-          val translationUnits = if (Files.isDirectory(input)) selected.filter(p => !headers(extension(p)) || entries.contains(p)) else selected
+          val translationUnits = if (Files.isDirectory(input))
+            entries.keys.toSeq.filter(_.startsWith(input)).filterNot(excluded).sortBy(_.toString)
+          else {
+            require(!excluded(input), s"Explicit translation unit is excluded: $input; correct the exclusions")
+            Seq(input)
+          }
           require(translationUnits.nonEmpty, s"Compilation database has no selected translation units under $input")
           translationUnits.map { source =>
             val matches = entries.getOrElse(source, throw new IllegalArgumentException(s"Compilation database assignment missing for $source; provide its compiler context"))
@@ -158,15 +167,15 @@ object ClangInputs {
             val (_, cwd, words) = matches.head
             val responses = mutable.ArrayBuffer.empty[Path]
             val expanded = expand(words, cwd, Set.empty, responses)
-            val command = buildCommand(expanded, source, cwd, config.clangCompiler)
-            val explicitFlags = config.includePaths.toSeq.sorted.map(path => "-I" + absolute(path, root)) ++ config.defines.toSeq.sorted.map("-D" + _)
+            val command = buildCommand(expanded, source, cwd, config.clangCompiler.map(value => compiler(value, processCwd).toString))
+            val explicitFlags = config.includePaths.toSeq.sorted.map(path => "-I" + absolute(path, processCwd)) ++ config.defines.toSeq.sorted.map("-D" + _)
             ClangInput(source, command.dropRight(1) ++ explicitFlags :+ source.toString, cwd, Seq(database) ++ responses)
           }
         case None =>
           val tool = config.clangCompiler.orElse(sys.env.get("INVARI_C_COMPILER")).getOrElse(
             throw new IllegalArgumentException("Clang compiler is unspecified; configure --clang-compiler or INVARI_C_COMPILER"))
-          val executable = compiler(tool, root).toString
-          val flags = config.includePaths.toSeq.sorted.map(path => "-I" + absolute(path, root)) ++ config.defines.toSeq.sorted.map("-D" + _)
+          val executable = compiler(tool, processCwd).toString
+          val flags = config.includePaths.toSeq.sorted.map(path => "-I" + absolute(path, processCwd)) ++ config.defines.toSeq.sorted.map("-D" + _)
           selected.map(p => ClangInput(p, Seq(executable) ++ flags :+ p.toString, root))
       }
     }

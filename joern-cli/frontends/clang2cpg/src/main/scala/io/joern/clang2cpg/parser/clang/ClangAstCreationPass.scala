@@ -140,6 +140,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     info(original).obj.get("usr").foreach(value => tag(node, "clang.declarationIdentity", value.str))
     info(original).obj.get("constant_value").foreach(value => tag(node, "clang.constantValue", value.str))
     info(original).obj.get("string_literal").foreach(value => tag(node, "clang.stringLiteral", ujson.write(value)))
+    info(original).obj.get("direct_callee_usr").foreach(value => tag(node, "clang.directCalleeIdentity", value.str))
     info(original).obj.get("storage_duration").foreach(value => tag(node, "clang.storageDuration", value.str))
     info(original).obj.get("initializer_kind").foreach(value => tag(node, "clang.initializerKind", value.str))
   }
@@ -400,8 +401,25 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     ">>"  -> Operators.arithmeticShiftRight,
     ","   -> "<operator>.comma"
   )
+  private def selectedGeneric(original: ujson.Value): ujson.Value = {
+    val selection = info(original)("generic_selection")
+    require(selection("controlling_expression_unevaluated").bool, "Clang generic controller must be unevaluated")
+    val associations = children(original).filter(_.obj.contains("associationKind"))
+    val index = selection("selected_association").num.toInt
+    require(index >= 0 && index < associations.size, "Clang generic association index is invalid")
+    val selected = associations.filter(_.obj.get("selected").contains(ujson.Bool(true)))
+    require(selected.size == 1 && selected.head == associations(index), "Clang generic association witnesses disagree")
+    def find(node: ujson.Value): Seq[ujson.Value] = {
+      val found = if (node.obj.get("id").contains(selection("selected_expression"))) Seq(node) else Seq.empty
+      found ++ children(node).flatMap(find)
+    }
+    val results = find(associations(index))
+    require(results.size == 1, "Clang selected generic expression is missing or ambiguous")
+    results.head
+  }
   private def unwrap(original: ujson.Value): ujson.Value = {
-    if (Set("ImplicitCastExpr", "ParenExpr")(kind(original))) {
+    if (kind(original) == "GenericSelectionExpr") unwrap(selectedGeneric(original))
+    else if (Set("ImplicitCastExpr", "ParenExpr")(kind(original))) {
       require(children(original).size == 1, "Clang transparent wrapper lacks one operand")
       unwrap(children(original).head)
     } else original
@@ -637,6 +655,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           builder.addEdge(result, receiver, EdgeTypes.RECEIVER)
           result
         }
+      case "GenericSelectionExpr" =>
+        val selected = selectedGeneric(original)
+        require(canonicalType(selected) == canonicalType(original), "Clang generic result type differs from its selected expression")
+        val result = expression(selected)
+        tag(result, "clang.genericSelection", ujson.write(info(original)("generic_selection")))
+        result
       case "StmtExpr" =>
         require(operands.size == 1 && kind(operands.head) == "CompoundStmt", "Clang statement expression requires one compound body")
         val block = NewBlock().code(text(original)).typeFullName(valueType(original))

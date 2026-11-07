@@ -85,6 +85,61 @@ class ClangInputsTests extends AnyWordSpec with Matchers {
         ClangInputs.plan(config(input).copy(compilationDatabaseFilename = Some(database.toString)))
       }.getMessage should include("missing")
     }
+    "select only database translation units under a directory without scanning unrelated sources" in {
+      val root = directory()
+      val input = source(root, "built.c")
+      source(root, "not-in-this-build.c")
+      source(root, "standalone.h")
+      val outside = source(directory(), "outside.c")
+      val database = root.resolve("compile_commands.json")
+      Files.writeString(database, ujson.write(Seq(input, outside).map(path => ujson.Obj(
+        "directory" -> path.getParent.toString, "file" -> path.toString,
+        "arguments" -> ujson.Arr(executable, "-c", path.toString)
+      ))))
+      val selected = ClangInputs.plan(config(root).copy(compilationDatabaseFilename = Some(database.toString)))
+      selected.map(_.source) shouldBe Seq(input)
+    }
+    "preserve database entries and explicitly selected files when a sibling preprocessed file exists" in {
+      val root = directory()
+      val input = source(root, "a.c")
+      source(root, "a.i")
+      val database = root.resolve("compile_commands.json")
+      Files.writeString(database, ujson.write(Seq(ujson.Obj(
+        "directory" -> root.toString, "file" -> input.toString,
+        "arguments" -> ujson.Arr(executable, "-c", input.toString)
+      ))))
+      ClangInputs.plan(config(root).copy(withPreprocessedFiles = true,
+        compilationDatabaseFilename = Some(database.toString))).map(_.source) shouldBe Seq(input)
+      ClangInputs.plan(config(input).copy(withPreprocessedFiles = true)).map(_.source) shouldBe Seq(input)
+    }
+    "resolve raw programmatic context paths from the process cwd while retaining database-relative build paths" in {
+      val root = directory()
+      val input = source(root, "src/a.c")
+      val context = directory()
+      val processCwd = java.nio.file.Paths.get("").toAbsolutePath.normalize()
+      def cliRelative(path: Path): String = processCwd.relativize(path).toString
+      val include = Files.createDirectories(context.resolve("cli-headers"))
+      val database = context.resolve("commands.json")
+      Files.writeString(database, ujson.write(Seq(ujson.Obj(
+        "directory" -> root.toString, "file" -> "src/a.c",
+        "arguments" -> ujson.Arr(executable, "-Ibuild-headers", "-c", "src/a.c")
+      ))))
+      val selected = ClangInputs.plan(config(input).copy(
+        compilationDatabaseFilename = Some(cliRelative(database)),
+        clangCompiler = Some(cliRelative(java.nio.file.Paths.get(executable))),
+        includePaths = Set(cliRelative(include))
+      )).head
+      selected.directory shouldBe root
+      selected.command shouldBe Seq(executable, "-I" + root.resolve("build-headers"), "-I" + include, input.toString)
+      ClangInputs.plan(config(input).copy(
+        clangCompiler = Some(cliRelative(java.nio.file.Paths.get(executable))),
+        includePaths = Set(cliRelative(include))
+      )).head.command shouldBe Seq(executable, "-I" + include, input.toString)
+      val command = context.resolve("argv.json")
+      val argv = Seq(executable, "-std=gnu11", input.toString)
+      Files.writeString(command, ujson.write(argv))
+      ClangInputs.plan(config(input).copy(clangCommand = Some(cliRelative(command)))).head.command shouldBe argv
+    }
     "reject shell operators and response-file cycles" in {
       intercept[IllegalArgumentException] { ClangInputs.commandWords("clang a.c; touch marker") }
       val root = directory()

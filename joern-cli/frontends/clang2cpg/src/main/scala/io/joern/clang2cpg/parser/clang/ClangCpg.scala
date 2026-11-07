@@ -17,6 +17,7 @@ object ClangCpg {
     withNewEmptyCpg(config.outputPath, config) { (graph, _) =>
       new MetaDataPass(graph, Languages.NEWC, root.toString).createAndApply()
       val bindings = mutable.LinkedHashMap.empty[String, String]
+      val inputsAtCapture = mutable.LinkedHashMap.empty[String, String]
       val plugin = ClangInputs.plugin(config)
       val directory = ClangInputs.evidenceDirectory(config)
       ClangCaptures.foreach(inputs.zipWithIndex, config.clangWorkers) { case (input, index) =>
@@ -26,6 +27,11 @@ object ClangCpg {
         (evidence, (System.nanoTime() - started).toDouble / 1e9)
       } { case ((input, index), (evidence, captureSeconds)) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
+        val receipt = ujson.read(Files.readString(captureDirectory.resolve("receipt.json")))
+        (evidence.document("inputs").obj.toSeq ++ receipt("tools").obj.toSeq).foreach { case (path, hash) =>
+          require(!inputsAtCapture.contains(path) || inputsAtCapture(path) == hash.str, s"Clang input changed between translation units: $path")
+          inputsAtCapture(path) = hash.str
+        }
         val graphStarted = System.nanoTime()
         val documentBytes = Files.size(captureDirectory.resolve("clang.json"))
         val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent, config.embedNativeEvidence)
@@ -42,9 +48,14 @@ object ClangCpg {
           Files.writeString(directory.resolve(f"tu-$index%05d.timings.json"), ujson.write(ujson.Obj(
             "source" -> input.source.toString, "capture_seconds" -> captureSeconds,
             "ast_seconds" -> graphSeconds, "archive_seconds" -> ((System.nanoTime() - archiveStarted).toDouble / 1e9),
-            "native_json_bytes" -> documentBytes, "archive_bytes" -> Files.size(archive)
+            "native_json_bytes" -> ujson.Num(documentBytes.toDouble), "archive_bytes" -> ujson.Num(Files.size(archive).toDouble)
           ), indent = 2))
         }
+      }
+      inputsAtCapture.foreach { case (name, expected) =>
+        val path = Paths.get(name)
+        require(Files.isRegularFile(path) && ClangParser.digest(path) == expected,
+          s"Clang input changed during repository generation: $path; regenerate the graph")
       }
       new ClangTypeNodePass(graph, bindings.toMap).createAndApply()
     }
