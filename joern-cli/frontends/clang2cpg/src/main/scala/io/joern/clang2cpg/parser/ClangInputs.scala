@@ -1,7 +1,7 @@
 package io.joern.clang2cpg.parser
 
 import io.joern.clang2cpg.Config
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path, Paths, FileVisitOption}
 import scala.jdk.CollectionConverters.*
 import scala.collection.mutable
 
@@ -93,7 +93,7 @@ object ClangInputs {
       }
       else if (word.startsWith("--sysroot=")) { out += "--sysroot=" + absolute(word.drop(10), cwd); index += 1 }
       else if (Seq("-MF", "-MT", "-MQ", "-MJ").exists(prefix => word.startsWith(prefix) && word.length > prefix.length)) index += 1
-      else if (!word.startsWith("-") && absolute(word, cwd) == source) { occurrences += 1; index += 1 }
+      else if (!word.startsWith("-") && Files.isRegularFile(absolute(word, cwd)) && existing(word, cwd) == source) { occurrences += 1; index += 1 }
       else {
         require(!Set("-emit-ast", "-fsyntax-only", "-M", "-MM")(word), s"Incompatible capture flag $word for $source")
         out += word; index += 1
@@ -116,7 +116,7 @@ object ClangInputs {
     }
     val discovered = if (Files.isRegularFile(input)) Seq(input) else {
       require(Files.isDirectory(input), s"Input is not a source file or directory: $input")
-      val walk = Files.walk(input)
+      val walk = Files.walk(input, FileVisitOption.FOLLOW_LINKS)
       try walk.iterator().asScala.filter(Files.isRegularFile(_)).map(_.toRealPath()).toSeq finally walk.close()
     }
     val selected = discovered.distinct.filterNot(excluded).filter { p =>
@@ -128,6 +128,8 @@ object ClangInputs {
     config.clangCommand match {
       case Some(name) =>
         require(Files.isRegularFile(input), "--clang-command requires one explicitly selected file")
+        require(config.includePaths.isEmpty && config.defines.isEmpty,
+          "--clang-command already defines the exact argv; put include/define options in that JSON")
         val file = existing(name, root)
         val words = ujson.read(Files.readString(file)).arr.toSeq.map(_.str)
         require(words.size >= 2 && words.last == input.toString, "Clang command must end with the exact selected absolute source path")
@@ -156,7 +158,9 @@ object ClangInputs {
             val (_, cwd, words) = matches.head
             val responses = mutable.ArrayBuffer.empty[Path]
             val expanded = expand(words, cwd, Set.empty, responses)
-            ClangInput(source, buildCommand(expanded, source, cwd, config.clangCompiler), cwd, Seq(database) ++ responses)
+            val command = buildCommand(expanded, source, cwd, config.clangCompiler)
+            val explicitFlags = config.includePaths.toSeq.sorted.map(path => "-I" + absolute(path, root)) ++ config.defines.toSeq.sorted.map("-D" + _)
+            ClangInput(source, command.dropRight(1) ++ explicitFlags :+ source.toString, cwd, Seq(database) ++ responses)
           }
         case None =>
           val tool = config.clangCompiler.orElse(sys.env.get("INVARI_C_COMPILER")).getOrElse(
