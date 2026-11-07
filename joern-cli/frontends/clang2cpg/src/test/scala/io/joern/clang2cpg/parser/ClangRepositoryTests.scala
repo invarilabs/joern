@@ -33,6 +33,7 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
       try {
         X2Cpg.applyDefaultOverlays(graph)
         graph.file.name.toSet should contain allOf ("left/common.c", "right/common.c")
+        graph.file.name.toList.distinct.size shouldBe graph.file.size
         val helpers = graph.method.nameExact("helper").toList
         helpers.size shouldBe 2
         helpers.map(_.fullName).distinct.size shouldBe 2

@@ -4,6 +4,7 @@ import io.joern.clang2cpg.parser.ClangEvidence
 import io.shiftleft.codepropertygraph.generated.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.passes.CpgPass
+import io.shiftleft.semanticcpg.language.*
 import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
@@ -152,16 +153,25 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   }
   private def namespace(file: String): NewNamespaceBlock = namespaces.getOrElseUpdate(
     file, {
-      val unit = NewFile().name(file).order(0)
-      if (includeFileContent && file != "<compiler>") {
-        val path = Paths.get(file)
-        val absolute = if (path.isAbsolute) path else root.resolve(path)
-        require(java.nio.file.Files.isRegularFile(absolute), s"Source content is unavailable: $absolute")
-        unit.content = java.nio.file.Files.readString(absolute)
+      val namespace = NewNamespaceBlock().name("<global>").fullName(scoped(file + ":<global>")).filename(file)
+      val existing = graph.file.nameExact(file).toList
+      require(existing.size <= 1, s"Duplicate CPG file identity: $file")
+      existing.headOption match {
+        case Some(unit) =>
+          add(namespace)
+          namespace.order = 1
+          builder.addEdge(unit, namespace, EdgeTypes.AST)
+        case None =>
+          val unit = NewFile().name(file).order(0)
+          if (includeFileContent && file != "<compiler>") {
+            val path = Paths.get(file)
+            val absolute = if (path.isAbsolute) path else root.resolve(path)
+            require(java.nio.file.Files.isRegularFile(absolute), s"Source content is unavailable: $absolute")
+            unit.content = java.nio.file.Files.readString(absolute)
+          }
+          add(unit)
+          ast(unit, namespace, 1)
       }
-      add(unit)
-      val namespace = NewNamespaceBlock().name("<global>").fullName(file + ":<global>").filename(file)
-      ast(unit, namespace, 1)
       namespace
     }
   )
@@ -194,7 +204,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .code(text(selected))
         .isExternal(!inMain(selected))
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
-        .astParentFullName(filename(selected) + ":<global>")
+        .astParentFullName(scoped(filename(selected) + ":<global>"))
       annotate(declaration, selected)
       val owner = namespace(filename(selected))
       ast(owner, declaration, owner.order + 1)
@@ -223,7 +233,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .aliasTypeFullName(valueType(node))
         .isExternal(!inMain(node))
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
-        .astParentFullName(filename(node) + ":<global>")
+        .astParentFullName(scoped(filename(node) + ":<global>"))
       annotate(alias, node)
       ast(namespace(filename(node)), alias, 1)
       bindings(identity(node)) = alias
@@ -283,7 +293,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .code(text(node))
         .isExternal(definitions.isEmpty)
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
-        .astParentFullName(filename(node) + ":<global>")
+        .astParentFullName(scoped(filename(node) + ":<global>"))
       annotate(method, node)
       tag(method, "clang.canonicalMethodFullName", canonicalName)
       ast(namespace(filename(node)), method, 1)
@@ -405,7 +415,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .code(definition("code").str)
         .filename(definitionFile)
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
-        .astParentFullName(definitionFile + ":<global>")
+        .astParentFullName(scoped(definitionFile + ":<global>"))
         .isExternal(true)
         .signature("")
       tag(method, "clang.canonicalMethodFullName", canonicalMacroName)
@@ -886,7 +896,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     }
     tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", payload)
     // Ownership is allocated after executable nodes, preserving source-local IDs.
-    emitted.toVector.filterNot(_.isInstanceOf[NewTag]).foreach(node =>
+    emitted.toVector.filterNot(node => node.isInstanceOf[NewTag] || node.isInstanceOf[NewFile]).foreach(node =>
       tag(node, "clang.translationUnitSource", evidence.source.toString)
     )
   }

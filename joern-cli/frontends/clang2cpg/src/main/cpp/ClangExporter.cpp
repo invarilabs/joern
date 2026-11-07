@@ -320,6 +320,16 @@ public:
     for (ParmVarDecl *Parameter : Function->parameters()) VisitDecl(Parameter);
     return true;
   }
+  bool VisitInitListExpr(InitListExpr *Initializer) {
+    if (!Context.getSourceManager().isWrittenInMainFile(Context.getSourceManager().getExpansionLoc(Initializer->getBeginLoc()))) return true;
+    if (auto *Filler = Initializer->getArrayFiller()) {
+      auto Entry = location(Filler->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
+      Entry["type"] = typeName(Filler->getType(), Context);
+      Entry["semantic_type"] = semanticType(Filler->getType(), Context);
+      Output.Nodes[identity(Filler)] = std::move(Entry);
+    }
+    return true;
+  }
   bool VisitStmt(Stmt *Statement) {
     if (!Context.getSourceManager().isWrittenInMainFile(Context.getSourceManager().getExpansionLoc(Statement->getBeginLoc()))) return true;
     auto Entry = location(Statement->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
