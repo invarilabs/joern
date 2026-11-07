@@ -331,7 +331,7 @@ public:
     return true;
   }
   bool VisitStmt(Stmt *Statement) {
-    if (!Context.getSourceManager().isWrittenInMainFile(Context.getSourceManager().getExpansionLoc(Statement->getBeginLoc()))) return true;
+    if (!isa<ImplicitValueInitExpr>(Statement) && !Context.getSourceManager().isWrittenInMainFile(Context.getSourceManager().getExpansionLoc(Statement->getBeginLoc()))) return true;
     auto Entry = location(Statement->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
     if (auto Expression = dyn_cast<Expr>(Statement)) {
       Entry["type"] = typeName(Expression->getType(), Context);

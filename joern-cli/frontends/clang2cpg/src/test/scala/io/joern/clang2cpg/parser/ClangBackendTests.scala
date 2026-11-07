@@ -47,6 +47,18 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "type compiler-generated omitted record initializers" in {
+      withGraph("struct Pair {int x;int y;}; struct Pair p={1}; int read(void) {return p.y;}") { (graph, _) =>
+        val omitted = graph.call.nameExact("<operator>.implicitValueInit").toList
+        omitted.size shouldBe 1
+        omitted.head.typeFullName shouldBe "int"
+        omitted.head._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.semanticType"
+          case _ => false
+        } shouldBe true
+      }
+    }
+
     "retain GNU statement expressions as typed value blocks with their declarations" in {
       withGraph("int f(void) {return ({int a=1; a+2;});}") { (graph, _) =>
         val block = graph.block.filter(node => node._taggedByOut.exists {
