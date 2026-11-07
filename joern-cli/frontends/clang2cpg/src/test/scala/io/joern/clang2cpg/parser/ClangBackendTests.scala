@@ -52,7 +52,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
         graph.local.nameExact("value").size shouldBe 1
         val assignments = graph.call.nameExact("<operator>.assignment").toList
         assignments.size shouldBe 1
-        assignments.head.argument(2).isLiteral.code.toList shouldBe List("3")
+        assignments.head.argument.argumentIndex(2).isLiteral.code.toList shouldBe List("3")
       }
     }
     "retain compiler assembly-goto targets as possible CFG branches" in {
