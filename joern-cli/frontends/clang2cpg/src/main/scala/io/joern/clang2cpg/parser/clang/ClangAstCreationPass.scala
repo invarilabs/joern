@@ -673,6 +673,20 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           }
         }
         Seq(control)
+      case "BreakStmt" | "ContinueStmt" =>
+        val category = if (kind(original) == "BreakStmt") ControlStructureTypes.BREAK else ControlStructureTypes.CONTINUE
+        val control = NewControlStructure().code(text(original)).controlStructureType(category).parserTypeName(kind(original))
+        annotate(control, original)
+        add(control)
+        Seq(control)
+      case "CaseStmt" | "DefaultStmt" =>
+        val isCase = kind(original) == "CaseStmt"
+        require(operands.size == (if (isCase) 2 else 1), s"Unsupported Clang case range: ${text(original)}")
+        val name = if (isCase) "case" else "default"
+        val label = NewJumpTarget().name(name).code(if (isCase) "case " + text(operands.head) + ":" else "default:")
+        annotate(label, original)
+        add(label)
+        Seq(label) ++ (if (isCase) Seq(expression(operands.head)) else Seq.empty) ++ statements(operands.last)
       case "GotoStmt" =>
         val jump = NewControlStructure()
           .controlStructureType(ControlStructureTypes.GOTO)

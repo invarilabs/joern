@@ -37,7 +37,7 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
         helpers.size shouldBe 2
         helpers.map(_.fullName).distinct.size shouldBe 2
         graph.call.nameExact("helper").toList.foreach { call =>
-          call._callOut.toList.map(_.filename) shouldBe List(call.method.filename)
+          call._callOut.collect { case method: io.shiftleft.codepropertygraph.generated.nodes.Method => method.filename }.toList shouldBe List(call.method.filename)
         }
         val records = graph.typeDecl.nameExact("Shared").filter(_.isExternal).toList
         records.size shouldBe 2

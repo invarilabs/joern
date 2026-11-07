@@ -47,6 +47,13 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain C switch labels and loop exits" in {
+      withGraph("int f(int x) {while(x) {--x; if(x == 3) continue; switch(x) {case 1: break; default: return x;}} return 0;}") { (graph, _) =>
+        graph.controlStructure.controlStructureType.toList should contain allOf ("BREAK", "CONTINUE", "SWITCH", "WHILE")
+        graph.jumpTarget.name.toList should contain allOf ("case", "default")
+      }
+    }
+
     "retain function-like empty macro invocations and source directive events" in {
       withGraph("#define EMPTY(x)\n#define VALUE 7\nint read(void) {EMPTY(1); return VALUE;}") { (graph, _) =>
         val contract = ujson.read(graph.tag.nameExact("clang.translationUnit").value.head)
