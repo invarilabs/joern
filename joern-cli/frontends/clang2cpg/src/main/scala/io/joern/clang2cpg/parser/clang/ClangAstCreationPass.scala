@@ -311,7 +311,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           "virtual_method" -> info(node)("virtual_method"))))
         method.astParentType = NodeTypes.TYPE_DECL
         method.astParentFullName = owner.fullName
-        ast(owner, method, children(node).count(kind(_) == "FieldDecl") + 1)
+        ast(owner, method, astParents.values.count(_ eq owner) + 1)
         if (!info(node)("static_method").bool) {
           val receiver = NewMethodParameterIn().name("this").code("this").index(0)
             .typeFullName(info(node)("this_spelling").str).evaluationStrategy(EvaluationStrategies.BY_VALUE).isVariadic(false)

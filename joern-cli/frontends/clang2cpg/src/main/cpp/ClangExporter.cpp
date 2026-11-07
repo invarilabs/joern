@@ -310,6 +310,7 @@ public:
       Entry["semantic_type"] = semanticType(Alias->getUnderlyingType(), Context);
     }
     if (auto Record = dyn_cast<RecordDecl>(Declaration)) {
+      if (isa<CXXRecordDecl>(Record)) Entry["usr"] = usr(Record);
       Entry["type"] = "clang:" + usr(Record);
       Entry["semantic_type"] = semanticType(Context.getRecordType(Record), Context);
       if (Record->getName().empty() && Record->getTypedefNameForAnonDecl())

@@ -34,6 +34,7 @@ class ClangCppNativeTests extends AnyWordSpec with Matchers {
       parameter("semantic_type")("pointee")("kind").str shouldBe "Record"
       val method = nodes.find(node => node.obj.get("name").exists(_.str == "f")).get
       method("owner_usr").str should not be empty
+      nodes.exists(node => node.obj.get("usr").contains(method("owner_usr")) && node.obj.get("semantic_type").exists(_("kind").str == "Record")) shouldBe true
       method("static_method").bool shouldBe false
       nodes.exists(node => node.obj.get("direct_callee_usr").contains(method("usr"))) shouldBe true
     }
