@@ -9,6 +9,27 @@ import java.nio.file.{Files, Paths}
 
 class ClangRepositoryTests extends AnyWordSpec with Matchers {
   "Repository Clang CPG" should {
+    "reject an earlier translation unit changed while a later one is captured" in {
+      val root = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "clang-input-guard-")
+      val first = root.resolve("a.c"); val second = root.resolve("b.c")
+      Files.writeString(first, "int a(void){return 1;}")
+      Files.writeString(second, "int b(void){return 2;}")
+      def quoted(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
+      val compiler = root.resolve("compiler")
+      Files.writeString(compiler, "#!/bin/sh\nlast=\nfor argument do last=\"$argument\"; done\nif [ \"$last\" = " + quoted(second.toString) +
+        " ]; then printf '%s\\n' 'int a(void){return 99;}' > " + quoted(first.toString) + "\nfi\nexec " + quoted(sys.env("CLANG_CPG_COMPILER")) + " \"$@\"\n")
+      Files.setPosixFilePermissions(compiler, java.nio.file.attribute.PosixFilePermissions.fromString("rwxr-xr-x"))
+      val db = root.resolve("compile_commands.json")
+      Files.writeString(db, ujson.write(Seq(first,second).map(source => ujson.Obj(
+        "directory" -> root.toString, "file" -> source.toString,
+        "arguments" -> ujson.Arr(compiler.toString, "-std=gnu11", "-c", source.toString)))))
+      val config = Config(compilationDatabaseFilename = Some(db.toString), embedNativeEvidence = false,
+        clangPlugin = Some(sys.env("CLANG_CPG_PLUGIN")), clangEvidenceDir = Some(root.resolve("evidence").toString)).withInputPath(root.toString)
+      val failure = new Clang2Cpg().createCpg(config).failed.get
+      failure.getMessage should include("input changed during repository generation")
+      Files.readString(first) should include("99")
+    }
+
     "keep same-basename translation units and their header declarations isolated" in {
       val root = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "clang-repo-")
       val header = root.resolve("shared.h")
