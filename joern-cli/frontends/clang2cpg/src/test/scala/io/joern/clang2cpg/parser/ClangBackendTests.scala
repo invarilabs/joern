@@ -47,6 +47,21 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "emit predefined strings from the compiler literal value" in {
+      withGraph("const char *named(void){return __func__;} const char *pretty(void){return __PRETTY_FUNCTION__;}") { (graph, _) =>
+        val values = graph.literal.toList.filter(node => node._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.kind" && tag.value == "PredefinedExpr"
+          case _ => false
+        })
+        values.size shouldBe 2
+        values.map(_.code) should contain ("\"named\"")
+        values.foreach(node => node._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.stringLiteral"
+          case _ => false
+        } shouldBe true)
+      }
+    }
+
     "preserve compiler-checked assertions without creating runtime message values" in {
       withGraph("_Static_assert(sizeof(int)>=2, \"int width\"); int f(void){_Static_assert(1, \"local proof\");return 1;}") { (graph, _) =>
         val proofs = graph.tag.nameExact("clang.staticAssertion").value.toList.map(ujson.read(_))

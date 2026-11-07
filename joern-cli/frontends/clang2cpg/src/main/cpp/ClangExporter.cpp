@@ -409,6 +409,23 @@ public:
       if (!Constructor) llvm::report_fatal_error("Clang CPG: construction lacks a resolved constructor declaration");
       Entry["constructor_usr"] = usr(Constructor);
     }
+    if (auto Predefined = dyn_cast<PredefinedExpr>(Statement)) {
+      const auto *Literal = Predefined->getFunctionName();
+      if (!Literal) llvm::report_fatal_error("Clang CPG: predefined expression lacks a compiler-provided string value");
+      const auto Name = PredefinedExpr::getIdentKindName(Predefined->getIdentKind());
+      if (Name.empty()) llvm::report_fatal_error("Clang CPG: predefined expression lacks a compiler identifier kind");
+      Entry["predefined_name"] = Name.str();
+      std::string LiteralSpelling;
+      llvm::raw_string_ostream LiteralStream(LiteralSpelling);
+      Literal->printPretty(LiteralStream, nullptr, Context.getPrintingPolicy());
+      LiteralStream.flush();
+      if (LiteralSpelling.empty()) llvm::report_fatal_error("Clang CPG: predefined expression lacks compiler literal spelling");
+      Entry["predefined_literal_spelling"] = LiteralSpelling;
+      llvm::json::Array Units;
+      for (unsigned Index = 0; Index < Literal->getLength(); ++Index)
+        Units.push_back(static_cast<int64_t>(Literal->getCodeUnit(Index)));
+      Entry["string_literal"] = llvm::json::Object{{"unit_width", Literal->getCharByteWidth()}, {"units", std::move(Units)}};
+    }
     if (auto Literal = dyn_cast<StringLiteral>(Statement)) {
       llvm::json::Array Units;
       for (unsigned Index = 0; Index < Literal->getLength(); ++Index)

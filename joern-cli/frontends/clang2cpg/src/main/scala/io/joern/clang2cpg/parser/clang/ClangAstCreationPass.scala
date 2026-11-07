@@ -526,6 +526,14 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val target = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
         add(target)
         call(original, Operators.cast, Seq(target, expression(operands.head)))
+      case "PredefinedExpr" =>
+        val facts = info(original)
+        require(facts.obj.contains("string_literal"), "Clang predefined expression lacks its compiler literal value")
+        val literal = NewLiteral().code(facts("predefined_literal_spelling").str).typeFullName(valueType(original))
+        annotate(literal, original)
+        tag(literal, "clang.predefinedName", facts("predefined_name").str)
+        add(literal)
+        literal
       case "IntegerLiteral" | "FloatingLiteral" | "CharacterLiteral" | "StringLiteral" =>
         val spelling = info(original).obj
           .get("spelling_code")
