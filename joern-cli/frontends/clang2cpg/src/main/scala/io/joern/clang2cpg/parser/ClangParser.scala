@@ -1,6 +1,6 @@
-package io.joern.c2cpg.parser
+package io.joern.clang2cpg.parser
 
-import io.joern.c2cpg.Config
+import io.joern.clang2cpg.Config
 import java.nio.file.{Files, Path, Paths}
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -9,8 +9,7 @@ import scala.jdk.CollectionConverters.*
 final case class ClangEvidence(
   source: Path,
   directory: Path,
-  document: ujson.Value,
-  completedFacts: Option[ujson.Value] = None
+  document: ujson.Value
 ) {
   def validate(): Unit = {
     val inputs = document("inputs").obj
@@ -46,12 +45,6 @@ object ClangParser {
     require(
       Files.isRegularFile(source) && source.toString.endsWith(".c"),
       "Clang prototype requires one explicit .c translation unit; directory mode is not implemented"
-    )
-    require(
-      config.includePaths.isEmpty && config.defines.isEmpty && config.compilationDatabaseFilename.isEmpty &&
-        !config.includePathsAutoDiscovery && !config.skipFunctionBodies && !config.withPreprocessedFiles &&
-        !config.cTypeEvidence && !config.printIfDefsOnly && !config.includeComments,
-      "Clang prototype takes its complete build configuration from --clang-command; conflicting options are unsupported"
     )
     def required(value: Option[String], option: String): Path =
       Paths
@@ -157,52 +150,6 @@ object ClangParser {
         indent = 2
       )
     )
-    val completed = config.clangFactsCommand.map { configured =>
-      val commandPath     = Paths.get(configured).toRealPath()
-      val producerCommand = ujson.read(Files.readString(commandPath)).arr.toSeq.map(_.str)
-      require(
-        producerCommand.size == 2,
-        "Frontend facts command must contain one Python executable and one producer script"
-      )
-      val producerInputs = producerCommand.map(value => Paths.get(value).toRealPath()) :+ commandPath
-      require(producerInputs.forall(Files.isRegularFile(_)), "Frontend facts executable/script/config is missing")
-      val before = producerInputs.map(path => path -> digest(path))
-      val output = directory.resolve("frontend-facts.json")
-      require(!Files.exists(output), "Frontend facts output must be fresh")
-      val argv = producerCommand ++ Seq("--native-dir", directory.toString, "--output", output.toString)
-      Files.writeString(directory.resolve("facts-command.json"), ujson.write(argv))
-      val started = System.nanoTime()
-      val process = new ProcessBuilder(argv.asJava)
-        .directory(source.getParent.toFile)
-        .redirectOutput(directory.resolve("facts.stdout").toFile)
-        .redirectError(directory.resolve("facts.log").toFile)
-        .start()
-      if (!process.waitFor(300, TimeUnit.SECONDS)) {
-        process.destroyForcibly().waitFor()
-        throw new IllegalStateException("Frontend facts producer timed out; inspect " + directory)
-      }
-      Files.writeString(
-        directory.resolve("facts-exit.json"),
-        ujson.write(
-          ujson.Obj("returncode" -> process.exitValue(), "seconds" -> (System.nanoTime() - started).toDouble / 1e9)
-        )
-      )
-      require(
-        process.exitValue() == 0 && Files.isRegularFile(output),
-        "Frontend facts producer failed; inspect " + directory.resolve("facts.log")
-      )
-      before.foreach { case (path, hash) =>
-        require(digest(path) == hash, "Frontend facts tool changed during graph creation: " + path)
-      }
-      val facts = ujson.read(Files.readString(output))
-      require(
-        facts("schema_version").num == 1 && facts("declarations")("compiler_ast")("schema_version").num == 3,
-        "Frontend completed facts schema is invalid"
-      )
-      before.foreach { case (path, hash) => facts("producer_tools")(path.toString) = ujson.Str(hash) }
-      evidence.validate()
-      facts
-    }
-    evidence.copy(completedFacts = completed)
+    evidence
   }
 }

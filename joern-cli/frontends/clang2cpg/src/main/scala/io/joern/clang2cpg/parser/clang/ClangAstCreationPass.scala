@@ -1,6 +1,6 @@
-package io.joern.c2cpg.parser.clang
+package io.joern.clang2cpg.parser.clang
 
-import io.joern.c2cpg.parser.ClangEvidence
+import io.joern.clang2cpg.parser.ClangEvidence
 import io.shiftleft.codepropertygraph.generated.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.passes.CpgPass
@@ -815,18 +815,6 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       "receipt"          -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json"))),
       "compiler_command" -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("command.json")))
     )
-    val selectedPayload = evidence.completedFacts match {
-      case Some(facts) =>
-        ujson.Obj(
-          "schema_version"   -> 2,
-          "source"           -> evidence.source.toString,
-          "macro_names"      -> document("macro_names"),
-          "fact_package"     -> facts,
-          "receipt"          -> nativePayload("receipt"),
-          "compiler_command" -> nativePayload("compiler_command")
-        )
-      case None => nativePayload
-    }
-    tag(namespace(evidence.source.getFileName.toString), "clang.nativeEvidence", ujson.write(selectedPayload))
+    tag(namespace(evidence.source.getFileName.toString), "clang.nativeEvidence", ujson.write(nativePayload))
   }
 }

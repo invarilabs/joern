@@ -1,7 +1,7 @@
-package io.joern.c2cpg.parser.clang
+package io.joern.clang2cpg.parser.clang
 
-import io.joern.c2cpg.Config
-import io.joern.c2cpg.parser.ClangParser
+import io.joern.clang2cpg.Config
+import io.joern.clang2cpg.parser.ClangParser
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
 import io.joern.x2cpg.passes.frontend.MetaDataPass
 import io.shiftleft.codepropertygraph.generated.{Cpg, Languages}

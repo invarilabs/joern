@@ -453,7 +453,7 @@ trait AstForTypesCreator { this: AstCreator =>
     }
 
     val nameAlias = decls.headOption.map(d => registerType(shortName(d))).filter(_.nonEmpty)
-    val alias     = if (hasCTypeEvidence) None else filterNameAlias(nameAlias, fullName)
+    val alias     = filterNameAlias(nameAlias, fullName)
 
     val typeDecl = typeSpecifier match {
       case c: ICPPASTCompositeTypeSpecifier =>
@@ -500,23 +500,14 @@ trait AstForTypesCreator { this: AstCreator =>
     val TypeFullNameInfo(name, fullName) = typeFullNameInfo(typeSpecifier)
     val nameAlias                        = decls.headOption.map(d => registerType(shortName(d))).filter(_.nonEmpty)
 
-    val declaredAlias = if (hasCTypeEvidence) typeSpecifier.getName.resolveBinding() match {
-      case record: ICompositeType    => cDeclaredTypeName(record)
-      case enumeration: IEnumeration => cDeclaredTypeName(enumeration)
-      case _                         => None
-    }
-    else None
-    val alias = declaredAlias match {
-      case Some(recordType) => filterNameAlias(Some(recordType), fullName)
-      case None             => filterNameAlias(nameAlias, fullName)
-    }
+    val alias    = filterNameAlias(nameAlias, fullName)
     val declAsts = decls.zipWithIndex.map { case (d, i) =>
       astForDeclarator(typeSpecifier.getParent.asInstanceOf[IASTSimpleDeclaration], d, i)
     }
 
-    if (alias.isEmpty || declaredAlias.nonEmpty) {
+    if (alias.isEmpty) {
       val filename = fileName(typeSpecifier)
-      val typeDecl = typeDeclNode(typeSpecifier, name, fullName, filename, code(typeSpecifier), alias = alias)
+      val typeDecl = typeDeclNode(typeSpecifier, name, fullName, filename, code(typeSpecifier))
       Ast(typeDecl) +: declAsts
     } else {
       declAsts
@@ -591,10 +582,7 @@ trait AstForTypesCreator { this: AstCreator =>
 
     val nameAlias = decls.headOption.map(d => registerType(shortName(d))).filter(_.nonEmpty)
     val alias     = filterNameAlias(nameAlias, fullName)
-    val (deAliasedName, deAliasedFullName, newAlias) = if (hasCTypeEvidence) {
-      val displayName = if (name.contains("<enum>") && nameAlias.isDefined) nameAlias.get else name
-      (displayName, fullName, None)
-    } else if (name.contains("<enum>") && alias.isDefined) {
+    val (deAliasedName, deAliasedFullName, newAlias) = if (name.contains("<enum>") && alias.isDefined) {
       (alias.get, fullName.substring(0, fullName.indexOf("<enum>")) + alias.get, None)
     } else { (name, fullName, alias) }
 

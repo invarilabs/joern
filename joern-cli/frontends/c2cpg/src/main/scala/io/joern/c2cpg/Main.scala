@@ -14,12 +14,6 @@ final case class Config(
   includePathsAutoDiscovery: Boolean = false,
   skipFunctionBodies: Boolean = false,
   withPreprocessedFiles: Boolean = false,
-  cTypeEvidence: Boolean = false,
-  parserBackend: String = "cdt",
-  clangCommand: Option[String] = None,
-  clangPlugin: Option[String] = None,
-  clangEvidenceDir: Option[String] = None,
-  clangFactsCommand: Option[String] = None,
   compilationDatabaseFilename: Option[String] = None,
   override val genericConfig: X2CpgConfig.GenericConfig = X2CpgConfig.GenericConfig()
 ) extends X2CpgConfig[Config] {
@@ -62,8 +56,6 @@ final case class Config(
     this.copy(withPreprocessedFiles = value)
   }
 
-  def withCTypeEvidence(value: Boolean): Config = copy(cTypeEvidence = value)
-
   def withCompilationDatabase(value: String): Config = {
     this.copy(compilationDatabaseFilename = Option(value))
   }
@@ -77,21 +69,6 @@ object Frontend {
     import builder.*
     OParser.sequence(
       programName(classOf[C2Cpg].getSimpleName),
-      opt[String]("parser")
-        .validate(value => if (Set("cdt", "clang")(value)) success else failure("parser must be cdt or clang"))
-        .action((value, config) => config.copy(parserBackend = value)),
-      opt[String]("clang-command")
-        .text("JSON argv for one explicit Clang translation-unit command")
-        .action((value, config) => config.copy(clangCommand = Some(value))),
-      opt[String]("clang-plugin")
-        .text("matching native Clang CPG exporter library")
-        .action((value, config) => config.copy(clangPlugin = Some(value))),
-      opt[String]("clang-facts-command")
-        .text("Explicit JSON argv for the frontend completed-facts producer")
-        .action((value, config) => config.copy(clangFactsCommand = Some(value))),
-      opt[String]("clang-evidence-dir")
-        .text("new directory retaining compiler and graph evidence")
-        .action((value, config) => config.copy(clangEvidenceDir = Some(value))),
       opt[Unit]("include-comments")
         .text(s"includes all comments into the CPG")
         .action((_, c) => c.withIncludeComments(true)),
@@ -114,11 +91,6 @@ object Frontend {
       opt[Unit]("with-include-auto-discovery")
         .text("enables auto discovery of system header include paths")
         .action((_, c) => c.withIncludePathsAutoDiscovery(true)),
-      opt[Unit]("with-c-type-evidence")
-        .text(
-          "preserves CDT-backed C record/enum identities and field/index types; unresolved required evidence is an error"
-        )
-        .action((_, config) => config.withCTypeEvidence(true)),
       opt[Unit]("skip-function-bodies")
         .text("instructs the parser to skip function and method bodies.")
         .action((_, c) => c.withSkipFunctionBodies(true)),
@@ -139,12 +111,7 @@ object Frontend {
             | For a cmake based build such a file is generated with the environment variable CMAKE_EXPORT_COMPILE_COMMANDS being present.
             | Clang based build are supported e.g., with https://github.com/rizsotto/Bear
             | """.stripMargin)
-        .action((d, c) => c.withCompilationDatabase(SourceFiles.toAbsolutePath(d, c.inputPath))),
-      checkConfig(config =>
-        if (config.parserBackend == "clang" && config.printIfDefsOnly)
-          failure("Clang preprocessor-only mode is not implemented; no CDT substitution is permitted")
-        else success
-      )
+        .action((d, c) => c.withCompilationDatabase(SourceFiles.toAbsolutePath(d, c.inputPath)))
     )
   }
 
