@@ -44,6 +44,12 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
           X2Cpg.applyDefaultOverlays(parallel)
           projection(parallel) shouldBe expected
           parallel.tag.nameExact("clang.nativeEvidence").size shouldBe 0
+          val archive = new java.util.zip.ZipFile(root.resolve("parallel-evidence/tu-00000.zip").toFile)
+          try {
+            val receipt = ujson.read(new String(archive.getInputStream(archive.getEntry("receipt.json")).readAllBytes(), java.nio.charset.StandardCharsets.UTF_8))
+            receipt("inputs")(sources.head.toString).str shouldBe ClangParser.digest(sources.head)
+            receipt("inputs")(header.toString).str shouldBe ClangParser.digest(header)
+          } finally archive.close()
         } finally parallel.close()
         val helpers = graph.method.nameExact("helper").toList
         helpers.size shouldBe 2

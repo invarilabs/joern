@@ -148,21 +148,14 @@ object ClangParser {
     )
     val evidence = ClangEvidence(source, directory, document)
     evidence.validate()
-    Files.writeString(
-      directory.resolve("receipt.json"),
-      ujson.write(
-        ujson.Obj(
-          "parser"           -> "clang",
-          "source"           -> source.toString,
-          "selected_command" -> ujson.Arr.from(selected),
-          "artifacts" -> ujson.Obj.from(artifacts.map(path => path.getFileName.toString -> ujson.Str(digest(path)))),
-          "command_sha256"  -> digest(directory.resolve("command.json")),
-          "evidence_sha256" -> digest(documentPath),
-          "tools" -> ujson.Obj.from(protectedInputs.map(input => input.target.toString -> ujson.Str(input.sha256)).distinct)
-        ),
-        indent = 2
-      )
+    val receipt = ujson.Obj(
+      "parser" -> "clang", "source" -> source.toString, "selected_command" -> ujson.Arr.from(selected),
+      "artifacts" -> ujson.Obj.from(artifacts.map(path => path.getFileName.toString -> ujson.Str(digest(path)))),
+      "command_sha256" -> digest(directory.resolve("command.json")), "evidence_sha256" -> digest(documentPath),
+      "tools" -> ujson.Obj.from(protectedInputs.map(item => item.target.toString -> ujson.Str(item.sha256)))
     )
+    if (!config.embedNativeEvidence) receipt("inputs") = document("inputs")
+    Files.writeString(directory.resolve("receipt.json"), ujson.write(receipt, indent = 2))
     evidence
   }
 }

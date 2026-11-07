@@ -21,9 +21,13 @@ object ClangCpg {
       val directory = ClangInputs.evidenceDirectory(config)
       ClangCaptures.foreach(inputs.zipWithIndex, config.clangWorkers) { case (input, index) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
-        ClangParser.capture(input, plugin, captureDirectory, config)
-      } { case ((input, index), evidence) =>
+        val started = System.nanoTime()
+        val evidence = ClangParser.capture(input, plugin, captureDirectory, config)
+        (evidence, (System.nanoTime() - started).toDouble / 1e9)
+      } { case ((input, index), (evidence, captureSeconds)) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
+        val graphStarted = System.nanoTime()
+        val documentBytes = Files.size(captureDirectory.resolve("clang.json"))
         val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent, config.embedNativeEvidence)
         syntax.createAndApply()
         syntax.sourceTypeBindings.foreach { case (key, value) =>
@@ -31,7 +35,16 @@ object ClangCpg {
           bindings(key) = value
         }
         evidence.validate()
-        if (repository) ClangArchive.complete(captureDirectory)
+        val graphSeconds = (System.nanoTime() - graphStarted).toDouble / 1e9
+        val archiveStarted = System.nanoTime()
+        if (repository) {
+          val archive = ClangArchive.complete(captureDirectory)
+          Files.writeString(directory.resolve(f"tu-$index%05d.timings.json"), ujson.write(ujson.Obj(
+            "source" -> input.source.toString, "capture_seconds" -> captureSeconds,
+            "ast_seconds" -> graphSeconds, "archive_seconds" -> ((System.nanoTime() - archiveStarted).toDouble / 1e9),
+            "native_json_bytes" -> documentBytes, "archive_bytes" -> Files.size(archive)
+          ), indent = 2))
+        }
       }
       new ClangTypeNodePass(graph, bindings.toMap).createAndApply()
     }
