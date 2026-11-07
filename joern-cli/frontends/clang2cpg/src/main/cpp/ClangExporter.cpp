@@ -5,6 +5,8 @@
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/RecursiveASTVisitor.h"
+#include "clang/AST/DeclCXX.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/Index/USRGeneration.h"
@@ -35,6 +37,10 @@ std::string typeName(QualType Type, ASTContext &Context) {
   if (Canonical.isRestrictQualified()) Prefix += "restrict ";
   if (auto Record = dyn_cast<RecordType>(Shape)) return Prefix + "clang:" + usr(Record->getDecl());
   if (auto Enum = dyn_cast<EnumType>(Shape)) return Prefix + "clang:" + usr(Enum->getDecl());
+  if (auto Reference = dyn_cast<ReferenceType>(Shape))
+    return typeName(Reference->getPointeeType(), Context) + (isa<LValueReferenceType>(Shape) ? "&" : "&&");
+  if (auto Member = dyn_cast<MemberPointerType>(Shape))
+    return typeName(Member->getPointeeType(), Context) + " " + typeName(QualType(Member->getClass(), 0), Context) + "::*";
   if (auto Pointer = dyn_cast<PointerType>(Shape))
     return typeName(Pointer->getPointeeType(), Context) + "*" + (Prefix.empty() ? "" : " " + Prefix);
   if (auto Array = dyn_cast<ArrayType>(Shape)) {
@@ -75,7 +81,14 @@ llvm::json::Object semanticType(QualType Type, ASTContext &Context) {
   if (Canonical.isVolatileQualified()) Qualifiers.push_back("volatile");
   if (Canonical.isRestrictQualified()) Qualifiers.push_back("restrict");
   Result["qualifiers"] = std::move(Qualifiers);
-  if (auto Pointer = dyn_cast<PointerType>(Shape)) {
+  if (auto Reference = dyn_cast<ReferenceType>(Shape)) {
+    Result["kind"] = isa<LValueReferenceType>(Shape) ? "LValueReference" : "RValueReference";
+    Result["pointee"] = semanticType(Reference->getPointeeType(), Context);
+  } else if (auto Member = dyn_cast<MemberPointerType>(Shape)) {
+    Result["kind"] = "MemberPointer";
+    Result["pointee"] = semanticType(Member->getPointeeType(), Context);
+    Result["owner"] = semanticType(QualType(Member->getClass(), 0), Context);
+  } else if (auto Pointer = dyn_cast<PointerType>(Shape)) {
     Result["kind"] = "Pointer";
     Result["pointee"] = semanticType(Pointer->getPointeeType(), Context);
   } else if (auto Function = dyn_cast<FunctionType>(Shape)) {
@@ -312,6 +325,18 @@ public:
       Entry["result_spelling"] = Function->getReturnType().getAsString(Context.getPrintingPolicy());
       Entry["variadic"] = Function->isVariadic(); Entry["has_body"] = Function->doesThisDeclarationHaveABody();
     }
+    if (auto Method = dyn_cast<CXXMethodDecl>(Declaration)) {
+      Entry["owner_usr"] = usr(Method->getParent());
+      Entry["owner_type"] = semanticType(Context.getRecordType(Method->getParent()), Context);
+      Entry["qualified_name"] = Method->getQualifiedNameAsString();
+      Entry["static_method"] = Method->isStatic();
+      Entry["const_method"] = Method->isConst();
+      Entry["virtual_method"] = Method->isVirtual();
+      if (!Method->isStatic()) {
+        Entry["this_type"] = semanticType(Method->getThisType(), Context);
+        Entry["this_spelling"] = Method->getThisType().getAsString(Context.getPrintingPolicy());
+      }
+    }
     if (auto Parameter = dyn_cast<ParmVarDecl>(Declaration)) Entry["original_type"] = typeName(Parameter->getOriginalType(), Context);
     Output.Nodes[identity(Declaration)] = std::move(Entry); return true;
   }
@@ -336,6 +361,16 @@ public:
     if (auto Expression = dyn_cast<Expr>(Statement)) {
       Entry["type"] = typeName(Expression->getType(), Context);
       Entry["semantic_type"] = semanticType(Expression->getType(), Context);
+    }
+    if (auto Call = dyn_cast<CXXMemberCallExpr>(Statement)) {
+      const auto *Method = Call->getMethodDecl();
+      if (!Method) llvm::report_fatal_error("Clang CPG: member call lacks a resolved method declaration");
+      Entry["direct_callee_usr"] = usr(Method);
+    }
+    if (auto Construction = dyn_cast<CXXConstructExpr>(Statement)) {
+      const auto *Constructor = Construction->getConstructor();
+      if (!Constructor) llvm::report_fatal_error("Clang CPG: construction lacks a resolved constructor declaration");
+      Entry["constructor_usr"] = usr(Constructor);
     }
     if (auto Literal = dyn_cast<StringLiteral>(Statement)) {
       llvm::json::Array Units;

@@ -79,7 +79,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     }
 
     "reject unsupported C++ declarations instead of silently producing an empty graph" in {
-      val (directory, config) = setup("struct A {int f() {return 1;}};")
+      val (directory, config) = setup("struct A {int x; A():x(1){}};")
       Files.writeString(directory.resolve("command.json"), ujson.write(Seq(
         sys.env("CLANG_CPG_COMPILER"), "-x", "c++", "-std=c++17", directory.resolve("sample.c").toString
       )))

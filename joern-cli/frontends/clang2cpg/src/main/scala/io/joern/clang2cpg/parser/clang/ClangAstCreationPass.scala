@@ -18,6 +18,9 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   private val metadata                  = document("nodes").obj
   private val declarations              = mutable.LinkedHashMap.empty[String, ujson.Value]
   private val bindings                  = mutable.LinkedHashMap.empty[String, NewNode]
+  private val recordOwners = mutable.Map.empty[String, NewTypeDecl]
+  private val thisParameters = mutable.Map.empty[NewMethod, NewMethodParameterIn]
+  private var activeThis: Option[NewMethodParameterIn] = None
   private val methods                   = mutable.LinkedHashMap.empty[String, NewMethod]
   private val namespaces                = mutable.LinkedHashMap.empty[String, NewNamespaceBlock]
   private val astParents                = mutable.Map.empty[NewNode, NewNode]
@@ -48,12 +51,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   }
   val sourceTypeBindings                = mutable.LinkedHashMap.empty[String, String]
   private lazy val canonicalRecordTypes = declarations.values
-    .filter(node => Set("RecordDecl", "EnumDecl")(kind(node)))
+    .filter(node => Set("RecordDecl", "CXXRecordDecl", "EnumDecl")(kind(node)))
     .map(canonicalType)
     .toSet
   private def valueType(node: ujson.Value): String = {
     val canonical = canonicalType(node)
-    if (Set("RecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) return scoped(canonical)
+    if (Set("RecordDecl", "CXXRecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) return scoped(canonical)
     val spelling = node.obj
       .get("type")
       .flatMap(_.obj.get("qualType"))
@@ -76,7 +79,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     spelling
   }
   private def sourceValueType(node: ujson.Value): String = {
-    if (Set("RecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) canonicalType(node)
+    if (Set("RecordDecl", "CXXRecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) canonicalType(node)
     else node("type")("qualType").str
   }
   private def declarationUsr(node: ujson.Value): String = {
@@ -187,7 +190,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   }
   private def registerTypes(): Unit = {
     val groups = mutable.LinkedHashMap.empty[String, mutable.ArrayBuffer[ujson.Value]]
-    declarations.values.filter(node => Set("RecordDecl", "EnumDecl")(kind(node))).foreach { node =>
+    declarations.values.filter(node => Set("RecordDecl", "CXXRecordDecl", "EnumDecl")(kind(node))).foreach { node =>
       groups.getOrElseUpdate(canonicalType(node), mutable.ArrayBuffer.empty) += node
     }
     groups.foreach { case (fullName, alternatives) =>
@@ -197,6 +200,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       )
       require(definitions.size <= 1, s"Multiple Clang definitions for canonical type $fullName")
       val selected    = definitions.headOption.getOrElse(alternatives.head)
+      if(kind(selected) == "CXXRecordDecl") require(selected.obj.get("bases").forall(_.arr.isEmpty),
+        "Unsupported Clang C++ base-class relationships: " + text(selected))
       val declaration = NewTypeDecl()
         .name(declarationName(selected))
         .fullName(scoped(fullName))
@@ -206,6 +211,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
         .astParentFullName(scoped(filename(selected) + ":<global>"))
       annotate(declaration, selected)
+      if(kind(selected) == "CXXRecordDecl") recordOwners(declarationUsr(selected)) = declaration
       val owner = namespace(filename(selected))
       ast(owner, declaration, owner.order + 1)
       alternatives.foreach(node => bindings(identity(node)) = declaration)
@@ -262,7 +268,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   }
   private def registerMethods(): Seq[(ujson.Value, NewMethod)] = {
     val groups = mutable.LinkedHashMap.empty[String, mutable.ArrayBuffer[ujson.Value]]
-    declarations.values.filter(kind(_) == "FunctionDecl").foreach { node =>
+    declarations.values.filter(node => Set("FunctionDecl", "CXXMethodDecl")(kind(node))).foreach { node =>
       groups.getOrElseUpdate(canonical(node), mutable.ArrayBuffer.empty) += node
     }
     val ordered = groups.toSeq.zipWithIndex
@@ -296,7 +302,25 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .astParentFullName(scoped(filename(node) + ":<global>"))
       annotate(method, node)
       tag(method, "clang.canonicalMethodFullName", canonicalName)
-      ast(namespace(filename(node)), method, 1)
+      if (kind(node) == "CXXMethodDecl") {
+        val owner = recordOwners.getOrElse(info(node)("owner_usr").str,
+          throw new IllegalArgumentException("Clang C++ method lacks its owner record: " + text(node)))
+        tag(method, "clang.cppMethod", ujson.write(ujson.Obj(
+          "owner_usr" -> info(node)("owner_usr"), "qualified_name" -> info(node)("qualified_name"),
+          "static_method" -> info(node)("static_method"), "const_method" -> info(node)("const_method"),
+          "virtual_method" -> info(node)("virtual_method"))))
+        method.astParentType = NodeTypes.TYPE_DECL
+        method.astParentFullName = owner.fullName
+        ast(owner, method, children(node).count(kind(_) == "FieldDecl") + 1)
+        if (!info(node)("static_method").bool) {
+          val receiver = NewMethodParameterIn().name("this").code("this").index(0)
+            .typeFullName(info(node)("this_spelling").str).evaluationStrategy(EvaluationStrategies.BY_VALUE).isVariadic(false)
+          tag(receiver, "clang.semanticType", ujson.write(info(node)("this_type")))
+          tag(receiver, "clang.sourceTypeSpelling", info(node)("this_spelling").str)
+          ast(method, receiver, 0)
+          thisParameters(method) = receiver
+        }
+      } else ast(namespace(filename(node)), method, 1)
       // Enter the real translation-unit scope alongside its first definition,
       // preserving c2cpg's source-method allocation convention.
       if (
@@ -487,7 +511,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       case "DeclRefExpr" =>
         val reference   = original("referencedDecl")
         val declaration = reference("id").str
-        val node        = if (reference("kind").str == "FunctionDecl") {
+        val node        = if (Set("FunctionDecl", "CXXMethodDecl")(reference("kind").str)) {
           val target =
             methods.getOrElse(declaration, throw new IllegalArgumentException(s"Missing Clang function $declaration"))
           NewMethodRef().code(text(original)).typeFullName(valueType(original)).methodFullName(target.fullName)
@@ -525,6 +549,22 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           case other => throw new IllegalArgumentException(s"Unsupported Clang unary operator $other")
         }
         call(original, operator, operands.map(expression))
+      case "CXXThisExpr" =>
+        val target = activeThis.getOrElse(throw new IllegalArgumentException("Clang this expression has no instance method owner"))
+        val receiver = NewIdentifier().name("this").code("this").typeFullName(valueType(original))
+        annotate(receiver, original)
+        add(receiver)
+        builder.addEdge(receiver, target, EdgeTypes.REF)
+        receiver
+      case "MemberExpr" if methods.contains(original("referencedMemberDecl").str) =>
+        require(operands.size == 1, "Clang method member reference requires one receiver")
+        val target = methods(original("referencedMemberDecl").str)
+        val methodRef = NewMethodRef().code(target.name).typeFullName(valueType(original)).methodFullName(target.fullName)
+        annotate(methodRef, original)
+        add(methodRef)
+        builder.addEdge(methodRef, target, EdgeTypes.REF)
+        call(original, if(original("isArrow").bool) Operators.indirectFieldAccess else Operators.fieldAccess,
+          Seq(expression(operands.head), methodRef))
       case "MemberExpr" =>
         require(operands.size == 1, "Clang member requires one owner")
         val declaration = original("referencedMemberDecl").str
@@ -560,10 +600,30 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
             require(operands.size == 1, "Clang sizeof requires one unevaluated expression"); operands.map(expression)
         }
         call(original, Operators.sizeOf, arguments)
+      case "CXXMemberCallExpr" =>
+        require(operands.nonEmpty, "Clang C++ member call lacks callee")
+        val callee = unwrap(operands.head)
+        require(kind(callee) == "MemberExpr", "Unsupported Clang C++ member call target: " + kind(callee))
+        val target = methods.getOrElse(callee("referencedMemberDecl").str,
+          throw new IllegalArgumentException("Clang C++ call has no resolved method declaration"))
+        val selected = declarations(callee("referencedMemberDecl").str)
+        require(info(selected)("usr").str == info(original)("direct_callee_usr").str,
+          "Clang C++ member call declaration identity disagrees")
+        val base = children(callee)
+        require(base.size == 1, "Clang C++ member call requires one typed receiver")
+        val receiver = expression(base.head)
+        val result = call(original, target.name, operands.tail.map(expression))
+        result.methodFullName = target.fullName
+        result.signature = target.signature
+        result.dispatchType = if(info(selected)("virtual_method").bool) DispatchTypes.DYNAMIC_DISPATCH else DispatchTypes.STATIC_DISPATCH
+        argument(result, receiver, 0)
+        builder.addEdge(result, receiver, EdgeTypes.RECEIVER)
+        builder.addEdge(result, target, EdgeTypes.CALL)
+        result
       case "CallExpr" =>
         require(operands.nonEmpty, "Clang call lacks a callee")
         val callee = unwrap(operands.head)
-        val direct = kind(callee) == "DeclRefExpr" && callee("referencedDecl")("kind").str == "FunctionDecl"
+        val direct = kind(callee) == "DeclRefExpr" && Set("FunctionDecl", "CXXMethodDecl")(callee("referencedDecl")("kind").str)
         if (direct) {
           val target = methods(callee("referencedDecl")("id").str)
           val result = call(original, target.name, operands.tail.map(expression))
@@ -740,7 +800,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         labels(original("declId").str) = label
         Seq(label) ++ operands.flatMap(statements)
       case "NullStmt"                                => Seq.empty // An empty C statement has no executable operation.
-      case "TypedefDecl" | "RecordDecl" | "EnumDecl" => Seq.empty // Already registered as non-executable declarations.
+      case "TypedefDecl" | "RecordDecl" | "CXXRecordDecl" | "EnumDecl" | "AccessSpecDecl" => Seq.empty // Already registered as non-executable declarations.
       case _ if metadata.get(identity(original)).exists(_.obj.contains("type")) => Seq(expression(original))
       case other => throw new IllegalArgumentException(s"Unsupported Clang statement $other: ${text(original)}")
     }
@@ -749,7 +809,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     builder = diffGraph
     index(document("ast"))
     declarations.values.foreach(info)
-    declarations.values.filter(inMain).find(node => kind(node).startsWith("CXX")).foreach { node =>
+    declarations.values.filter(inMain).find(node =>
+      ((kind(node).startsWith("CXX") && !Set("CXXRecordDecl", "CXXMethodDecl")(kind(node))) ||
+        Set("ClassTemplateDecl", "FunctionTemplateDecl", "ClassTemplateSpecializationDecl")(kind(node))) &&
+        !node.obj.get("isImplicit").exists(_.bool)
+    ).foreach { node =>
       throw new IllegalArgumentException(s"Unsupported Clang declaration ${kind(node)}: ${text(node)}; native C++ graph support is required")
     }
     namespace(graphFilename(evidence.source.toString))
@@ -810,7 +874,12 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         tag(method, "clang.functionMacroInvocations", ujson.write(ujson.Arr.from(macroInvocations)))
         val bodies = children(original).filter(kind(_) == "CompoundStmt")
         require(bodies.size == 1, s"Clang source method lacks one body: ${method.fullName}")
-        val body = statements(bodies.head).head.asInstanceOf[NewBlock]
+        val body = {
+          require(activeThis.isEmpty, "nested active C++ method receiver")
+          activeThis = thisParameters.get(method)
+          try statements(bodies.head).head.asInstanceOf[NewBlock]
+          finally activeThis = None
+        }
         ast(method, body, children(original).count(kind(_) == "ParmVarDecl") + 1)
         methodBodies(method) = body
       }
