@@ -547,10 +547,10 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         add(literal)
         literal
       case "IntegerLiteral" | "FloatingLiteral" | "CharacterLiteral" | "StringLiteral" =>
-        val spelling = info(original).obj
+        val spelling = if (kind(original) == "StringLiteral") info(original)("compiler_literal_spelling").str else info(original).obj
           .get("spelling_code")
           .map(_.str)
-          .getOrElse(throw new IllegalArgumentException("Clang literal lacks physical spelling evidence"))
+          .getOrElse(throw new IllegalArgumentException(s"Clang ${kind(original)} literal lacks physical spelling evidence in ${filename(original)}"))
         val literal = NewLiteral().code(spelling).typeFullName(valueType(original))
         annotate(literal, original)
         add(literal)

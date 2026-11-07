@@ -563,6 +563,12 @@ public:
       Entry["string_literal"] = llvm::json::Object{{"unit_width", Literal->getCharByteWidth()}, {"units", std::move(Units)}};
     }
     if (auto Literal = dyn_cast<StringLiteral>(Statement)) {
+      std::string LiteralSpelling;
+      llvm::raw_string_ostream LiteralStream(LiteralSpelling);
+      Literal->printPretty(LiteralStream, nullptr, Context.getPrintingPolicy());
+      LiteralStream.flush();
+      if (LiteralSpelling.empty()) llvm::report_fatal_error("Clang CPG: string literal lacks compiler spelling");
+      Entry["compiler_literal_spelling"] = LiteralSpelling;
       llvm::json::Array Units;
       for (unsigned Index = 0; Index < Literal->getLength(); ++Index)
         Units.push_back(static_cast<int64_t>(Literal->getCodeUnit(Index)));

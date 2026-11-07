@@ -47,6 +47,18 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain compiler-concatenated string values across source and macro spelling" in {
+      withGraph("#define TAIL \"tail\"\nconst char *f(void){return \"head\" TAIL;}") { (graph, _) =>
+        val literal = graph.literal.head
+        literal.code shouldBe "\"headtail\""
+        val strings = literal._taggedByOut.collect {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.stringLiteral" => ujson.read(tag.value)
+        }.toList
+        strings.size shouldBe 1
+        strings.head("units").arr.map(_.num.toInt.toChar).mkString shouldBe "headtail"
+      }
+    }
+
     "preserve atomic operand roles and source argument order" in {
       withGraph("int *ptr(void); int value(void); int order(void); int update(void){return __atomic_fetch_add(ptr(),value(),order());}") { (graph, _) =>
         val atomic = graph.call.nameExact("<operator>.atomic.__atomic_fetch_add").head
