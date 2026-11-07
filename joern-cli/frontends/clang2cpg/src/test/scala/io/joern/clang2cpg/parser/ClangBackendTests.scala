@@ -534,8 +534,8 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       def identities(configuration: Config): List[String] = {
         val graph = new Clang2Cpg().createCpg(configuration).get
         try
-          graph.tag
-            .filter(tag => Set("clang.declarationMacro", "clang.declarationIdentity")(tag.name))
+          graph.all.flatMap(_._taggedByOut)
+            .collect { case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if Set("clang.declarationMacro", "clang.declarationIdentity")(tag.name) => tag }
             .map(tag => tag.name + ":" + tag.value)
             .l
             .sorted

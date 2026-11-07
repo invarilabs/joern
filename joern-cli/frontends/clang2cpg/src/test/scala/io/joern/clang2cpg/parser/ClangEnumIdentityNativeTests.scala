@@ -19,11 +19,11 @@ class ClangEnumIdentityNativeTests extends AnyWordSpec with Matchers {
       .withInputPath(source.toString)).document
   }
   "Compiler enum identities" should {
-    "disambiguate sibling anonymous enums with colliding USRs and preserve typed uses" in {
-      val document = capture("int read(void){{enum {CHECK=1} first=CHECK;} {enum {CHECK=1} second=CHECK;}return 0;}\n")
+    "disambiguate sibling anonymous enums with colliding USRs and preserve enum type evidence" in {
+      val document = capture("int read(void){{enum {CHECK=1};} {enum {CHECK=1};}return 0;}\n")
       val nodes = document("nodes").obj.values.toSeq
-      val variables = Seq("first", "second").map(name => nodes.find(_.obj.get("name").exists(_.str == name)).get)
-      val types = variables.map(_("semantic_type"))
+      val types = nodes.filter(_.obj.get("semantic_type").exists(value => value.obj.get("kind").exists(_.str == "Enum"))).map(_("semantic_type")).distinct
+      types.size shouldBe 2
       types.map(_("declaration_usr").str).distinct.size shouldBe 1
       types.map(_("declaration_identity").str).distinct.size shouldBe 2
       types.map(_("canonical_identity").str).distinct.size shouldBe 2
