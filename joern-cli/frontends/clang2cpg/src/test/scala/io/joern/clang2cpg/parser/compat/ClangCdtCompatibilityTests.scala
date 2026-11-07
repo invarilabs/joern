@@ -42,7 +42,7 @@ object ClangCdtCompatibilityTests {
       config,
       translationUnit,
       new HeaderFileFinder(config)
-    )(config.schemaValidation).createAst()
+    )(using config.schemaValidation).createAst()
     val result = Cpg.empty
     try {
       DiffGraphApplier.applyDiff(result.graph, diff)
