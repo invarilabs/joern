@@ -33,7 +33,7 @@ class ClangCppBackendTests extends AnyWordSpec with Matchers {
         val call=graph.call.nameExact("add").head
         call.argument.argumentIndex(0).code.toList shouldBe List("c")
         call.argument.argumentIndex(1).code.toList shouldBe List("n")
-        call.callee.name.toList shouldBe List("add")
+        call._callOut.collect {case method: io.shiftleft.codepropertygraph.generated.nodes.Method => method.name}.toList shouldBe List("add")
       }
     }
     "retain const receivers, static calls and declaration-distinct overloads" in {

@@ -104,7 +104,13 @@ object ClangParser {
       .redirectOutput(directory.resolve("compiler.stdout").toFile)
       .redirectError(directory.resolve("compiler.log").toFile)
       .start()
-    if (!process.waitFor(300, TimeUnit.SECONDS)) {
+    val exited = try process.waitFor(300, TimeUnit.SECONDS) catch {
+      case error: InterruptedException =>
+        process.destroyForcibly().waitFor()
+        Thread.currentThread().interrupt()
+        throw error
+    }
+    if (!exited) {
       process.destroyForcibly().waitFor()
       throw new IllegalStateException(
         s"Clang timed out; inspect $directory and correct the compiler/build configuration"

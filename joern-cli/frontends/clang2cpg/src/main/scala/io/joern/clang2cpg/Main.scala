@@ -10,6 +10,7 @@ import scala.util.Try
 final case class Config(
   parserBackend: String = "clang",
   clangCommand: Option[String] = None,
+  clangWorkers: Int = 1,
   clangCompiler: Option[String] = None,
   clangPlugin: Option[String] = None,
   clangEvidenceDir: Option[String] = None,
@@ -61,6 +62,9 @@ object Frontend {
       opt[String]("parser")
         .validate(value => if (value == "clang") success else failure("clang2cpg supports only --parser clang"))
         .action((value, config) => config.copy(parserBackend = value)),
+      opt[Int]("clang-workers")
+        .validate(value => if (value > 0) success else failure("--clang-workers must be positive"))
+        .action((value, config) => config.copy(clangWorkers = value)),
       opt[String]("clang-command")
         .text("JSON argv with the exact compiler, build flags and one source file")
         .action((value, config) => config.copy(clangCommand = Some(value))),

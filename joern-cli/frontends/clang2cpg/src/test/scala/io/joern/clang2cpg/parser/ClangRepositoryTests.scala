@@ -34,6 +34,16 @@ class ClangRepositoryTests extends AnyWordSpec with Matchers {
         X2Cpg.applyDefaultOverlays(graph)
         graph.file.name.toSet should contain allOf ("left/common.c", "right/common.c")
         graph.file.name.toList.distinct.size shouldBe graph.file.size
+        def projection(value: io.shiftleft.codepropertygraph.generated.Cpg): List[String] =
+          value.file.nameExact("left/common.c", "right/common.c").ast.toList.sortBy(_.id).map(node =>
+            node.label + ":" + node.seq + ":" + node.propertyOption[String]("CODE").getOrElse("") + ":" + node.propertyOption[String]("TYPE_FULL_NAME").getOrElse("")
+          )
+        val expected = projection(graph)
+        val parallel = new Clang2Cpg().createCpg(config.copy(clangWorkers = 2, clangEvidenceDir = Some(root.resolve("parallel-evidence").toString))).get
+        try {
+          X2Cpg.applyDefaultOverlays(parallel)
+          projection(parallel) shouldBe expected
+        } finally parallel.close()
         val helpers = graph.method.nameExact("helper").toList
         helpers.size shouldBe 2
         helpers.map(_.fullName).distinct.size shouldBe 2

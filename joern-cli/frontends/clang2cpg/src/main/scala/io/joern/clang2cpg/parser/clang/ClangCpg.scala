@@ -1,7 +1,7 @@
 package io.joern.clang2cpg.parser.clang
 
 import io.joern.clang2cpg.Config
-import io.joern.clang2cpg.parser.{ClangParser, ClangInputs}
+import io.joern.clang2cpg.parser.{ClangParser, ClangInputs, ClangCaptures}
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
 import io.joern.x2cpg.passes.frontend.MetaDataPass
 import io.shiftleft.codepropertygraph.generated.{Cpg, Languages}
@@ -19,9 +19,11 @@ object ClangCpg {
       val bindings = mutable.LinkedHashMap.empty[String, String]
       val plugin = ClangInputs.plugin(config)
       val directory = ClangInputs.evidenceDirectory(config)
-      inputs.zipWithIndex.foreach { case (input, index) =>
+      ClangCaptures.foreach(inputs.zipWithIndex, config.clangWorkers) { case (input, index) =>
         val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
-        val evidence = ClangParser.capture(input, plugin, captureDirectory, config)
+        ClangParser.capture(input, plugin, captureDirectory, config)
+      } { case ((input, index), evidence) =>
+        val captureDirectory = if (repository) directory.resolve(f"tu-$index%05d") else directory
         val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent)
         syntax.createAndApply()
         syntax.sourceTypeBindings.foreach { case (key, value) =>
