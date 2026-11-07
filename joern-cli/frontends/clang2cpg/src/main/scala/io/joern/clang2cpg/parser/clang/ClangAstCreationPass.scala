@@ -4,11 +4,15 @@ import io.joern.clang2cpg.parser.ClangEvidence
 import io.shiftleft.codepropertygraph.generated.*
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.passes.CpgPass
-import java.nio.file.Paths
+import java.nio.file.{Path, Paths}
 import scala.collection.mutable
 
 /** Native Clang syntax to CPG. Unsupported executable shapes abort graph creation. */
-class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(graph) {
+class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Option[Path] = None, skipFunctionBodies: Boolean = false) extends CpgPass(graph) {
+  private val root = graphRoot.getOrElse(evidence.source.getParent)
+  private val scope = graphRoot.map(_ => "tu:" + root.relativize(evidence.source).toString + ":").getOrElse("")
+  private def scoped(name: String): String = scope + name
+  private val emitted = mutable.ArrayBuffer.empty[NewNode]
   private val document                  = evidence.document
   private val metadata                  = document("nodes").obj
   private val declarations              = mutable.LinkedHashMap.empty[String, ujson.Value]
@@ -23,7 +27,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
   private var builder: DiffGraphBuilder = null
   private val added = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[NewNode, java.lang.Boolean]())
   private def add(node: NewNode): Unit = {
-    if (added.add(node)) builder.addNode(node)
+    if (added.add(node)) { builder.addNode(node); emitted += node }
   }
 
   private def children(node: ujson.Value): Seq[ujson.Value] =
@@ -48,13 +52,18 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
     .toSet
   private def valueType(node: ujson.Value): String = {
     val canonical = canonicalType(node)
-    if (Set("RecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) return canonical
+    if (Set("RecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) return scoped(canonical)
     val spelling = node.obj
       .get("type")
       .flatMap(_.obj.get("qualType"))
       .map(_.str)
       .getOrElse(throw new IllegalArgumentException(s"Clang node lacks source type spelling: ${kind(node)}"))
     require(spelling.nonEmpty && spelling != "ANY", "Clang source type spelling is unresolved")
+    if (scope.nonEmpty && canonical.contains("clang:")) {
+      val graphType = scoped(canonical)
+      sourceTypeBindings(graphType) = graphType
+      return graphType
+    }
     if (canonicalRecordTypes(canonical)) {
       sourceTypeBindings
         .get(spelling)
@@ -64,6 +73,10 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       sourceTypeBindings(spelling) = canonical
     }
     spelling
+  }
+  private def sourceValueType(node: ujson.Value): String = {
+    if (Set("RecordDecl", "EnumDecl", "TypedefDecl")(kind(node))) canonicalType(node)
+    else node("type")("qualType").str
   }
   private def declarationUsr(node: ujson.Value): String = {
     val value = info(node).obj
@@ -81,7 +94,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
     source(node).exists(name => Paths.get(name).toAbsolutePath.normalize() == evidence.source)
   private def graphFilename(name: String): String = {
     val path = Paths.get(name).toAbsolutePath.normalize()
-    if (path.startsWith(evidence.source.getParent)) evidence.source.getParent.relativize(path).toString
+    if (path.startsWith(root)) root.relativize(path).toString
     else path.toString
   }
   private def filename(node: ujson.Value): String = source(node) match {
@@ -118,6 +131,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
     builder.addEdge(node, annotation, EdgeTypes.TAGGED_BY)
   }
   private def semanticAnnotations(node: NewNode, original: ujson.Value): Unit = {
+    info(original).obj.get("type").filter(_.str.nonEmpty).foreach(_ => tag(node, "clang.sourceTypeSpelling", sourceValueType(original)))
     info(original).obj.get("semantic_type").foreach(value => tag(node, "clang.semanticType", ujson.write(value)))
     info(original).obj.get("usr").foreach(value => tag(node, "clang.declarationIdentity", value.str))
     info(original).obj.get("constant_value").foreach(value => tag(node, "clang.constantValue", value.str))
@@ -169,7 +183,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       val selected    = definitions.headOption.getOrElse(alternatives.head)
       val declaration = NewTypeDecl()
         .name(declarationName(selected))
-        .fullName(fullName)
+        .fullName(scoped(fullName))
         .filename(filename(selected))
         .code(text(selected))
         .isExternal(!inMain(selected))
@@ -211,7 +225,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
   }
   private var translationUnitScope: Option[(NewMethod, NewBlock)] = None
   private def globalScope(): (NewMethod, NewBlock)                = translationUnitScope.getOrElse {
-    val file   = evidence.source.getFileName.toString
+    val file   = graphFilename(evidence.source.toString)
     val owner  = namespace(file)
     val method = NewMethod()
       .name("<global>")
@@ -253,7 +267,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
           .getOrElse(throw new IllegalArgumentException(s"Clang canonical function declaration is missing: $root"))
       )
       val name     = declarationName(node)
-      val fullName = "clang:" + info(node)("usr").str + ":" + valueType(node)
+      val canonicalName = "clang:" + info(node)("usr").str + ":" + sourceValueType(node)
+      val fullName = scoped(canonicalName)
       val method   = NewMethod()
         .name(name)
         .fullName(fullName)
@@ -264,6 +279,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
         .astParentFullName(filename(node) + ":<global>")
       annotate(method, node)
+      tag(method, "clang.canonicalMethodFullName", canonicalName)
       ast(namespace(filename(node)), method, 1)
       // Enter the real translation-unit scope alongside its first definition,
       // preserving c2cpg's source-method allocation convention.
@@ -385,6 +401,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
         .astParentFullName(definitionFile + ":<global>")
         .isExternal(true)
         .signature("")
+      tag(method, "clang.canonicalMethodFullName", fullName)
       ast(namespace(definitionFile), method, 1)
       ast(
         method,
@@ -680,7 +697,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
     builder = diffGraph
     index(document("ast"))
     declarations.values.foreach(info)
-    namespace(evidence.source.getFileName.toString)
+    namespace(graphFilename(evidence.source.toString))
     registerTypes()
     val registeredMethods                       = registerMethods()
     val localDeclarations                       = mutable.LinkedHashSet.empty[String]
@@ -727,7 +744,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       }
     }
     registeredMethods.foreach { case (original, method) =>
-      if (!method.isExternal) {
+      if (!method.isExternal && !skipFunctionBodies) {
         val origin           = info(original)
         val macroInvocations = document("macros").arr.filter { invocation =>
           invocation.obj.get("file") == origin.obj.get("file") && !invocation("macro").bool && invocation(
@@ -788,12 +805,13 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       builder.addEdge(origin, label, EdgeTypes.JUMP_ARGUMENT)
     }
     tag(
-      namespace(evidence.source.getFileName.toString),
+      namespace(graphFilename(evidence.source.toString)),
       "clang.translationUnit",
       ujson.write(
         ujson.Obj(
           "schema_version" -> 1,
           "source"         -> evidence.source.toString,
+          "function_bodies" -> !skipFunctionBodies,
           "inputs"         -> document("inputs"),
           "tools"   -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json")))("tools"),
           "command" -> ujson
@@ -803,6 +821,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
         )
       )
     )
+    document.obj.get("comments").foreach(_.arr.foreach { original =>
+      val comment = NewComment().code(original("code").str).filename(graphFilename(original("file").str))
+        .lineNumber(original("line").num.toInt).columnNumber(original("column").num.toInt)
+      ast(namespace(graphFilename(original("file").str)), comment, 0)
+    })
     val nativePayload = ujson.Obj(
       "schema_version"   -> 1,
       "source"           -> evidence.source.toString,
@@ -815,6 +838,10 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence) extends CpgPass(
       "receipt"          -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json"))),
       "compiler_command" -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("command.json")))
     )
-    tag(namespace(evidence.source.getFileName.toString), "clang.nativeEvidence", ujson.write(nativePayload))
+    tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", ujson.write(nativePayload))
+    // Ownership is allocated after executable nodes, preserving source-local IDs.
+    emitted.toVector.filterNot(_.isInstanceOf[NewTag]).foreach(node =>
+      tag(node, "clang.translationUnitSource", evidence.source.toString)
+    )
   }
 }

@@ -1,15 +1,15 @@
 package io.joern.clang2cpg.parser
 
-import io.joern.clang2cpg.{Clang2Cpg, Config, Frontend}
+import io.joern.clang2cpg.{Config, Frontend}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AnyWordSpec
 import scopt.OParser
 
 class ClangParserTests extends AnyWordSpec with Matchers {
   "Clang parser selection" should {
-    "reject an implicit backend instead of replacing default CDT behavior" in {
-      OParser.parse(Frontend.cmdLineParser, Seq.empty[String], Config()).isDefined shouldBe false
-      new Clang2Cpg().createCpg(Config()).isFailure shouldBe true
+    "select Clang by default as the replacement frontend" in {
+      Config().parserBackend shouldBe "clang"
+      OParser.parse(Frontend.cmdLineParser, Seq.empty[String], Config()).get.parserBackend shouldBe "clang"
     }
     "reject explicit CDT and removed completed-facts options" in {
       OParser.parse(Frontend.cmdLineParser, Seq("--parser", "cdt"), Config()).isDefined shouldBe false
@@ -19,16 +19,40 @@ class ClangParserTests extends AnyWordSpec with Matchers {
         Config()
       ).isDefined shouldBe false
     }
-    "reject a preprocessing operation that would route a Clang request through CDT" in {
-      OParser
-        .parse(Frontend.cmdLineParser, Seq("--parser", "clang", "--print-ifdef-only"), Config())
-        .isDefined shouldBe false
+    "accept the stock preprocessor-only mode" in {
+      OParser.parse(Frontend.cmdLineParser, Seq("--print-ifdef-only"), Config()).get.printIfDefsOnly shouldBe true
     }
-    "reject the same incompatible operation through the programmatic API" in {
-      val failure = intercept[IllegalArgumentException] {
-        new Clang2Cpg().printIfDefsOnly(Config().copy(parserBackend = "clang", printIfDefsOnly = true))
-      }
-      failure.getMessage should include("Clang preprocessor-only mode is not implemented")
+    "retain every stock C frontend option in explicit configuration" in {
+      val arguments = Seq(
+        "--include", "/headers/one", "--include", "/headers/two",
+        "--define", "COUNT=2", "--define", "FEATURE",
+        "--include-comments", "--log-problems", "--log-preprocessor",
+        "--with-include-auto-discovery", "--skip-function-bodies", "--with-preprocessed-files",
+        "--compilation-database", "/build/compile_commands.json", "--clang-compiler", "/toolchain/clang"
+      )
+      val selected = OParser.parse(Frontend.cmdLineParser, arguments, Config()).get
+      selected.includePaths shouldBe Set("/headers/one", "/headers/two")
+      selected.defines shouldBe Set("COUNT=2", "FEATURE")
+      selected.includeComments shouldBe true
+      selected.logProblems shouldBe true
+      selected.logPreprocessor shouldBe true
+      selected.includePathsAutoDiscovery shouldBe true
+      selected.skipFunctionBodies shouldBe true
+      selected.withPreprocessedFiles shouldBe true
+      selected.compilationDatabaseFilename shouldBe Some("/build/compile_commands.json")
+      selected.clangCompiler shouldBe Some("/toolchain/clang")
+    }
+    "honor an explicit discovery disable after an enable" in {
+      val selected = OParser.parse(
+        Frontend.cmdLineParser,
+        Seq("--with-include-auto-discovery", "--no-include-auto-discovery"),
+        Config()
+      ).get
+      selected.includePathsAutoDiscovery shouldBe false
+    }
+    "record the deprecated image-location compatibility flag explicitly" in {
+      OParser.parse(Frontend.cmdLineParser, Seq("--no-image-locations"), Config()).get
+        .legacyNoImageLocations shouldBe true
     }
     "accept an explicitly selected compiler and evidence configuration" in {
       val arguments = Seq(

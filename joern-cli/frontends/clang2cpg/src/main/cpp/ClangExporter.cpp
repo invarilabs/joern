@@ -146,7 +146,8 @@ llvm::json::Object semanticType(QualType Type, ASTContext &Context) {
 }
 struct Evidence {
   llvm::json::Object Nodes;
-  llvm::json::Array Macros, Tokens, Directives;
+  llvm::json::Array Macros, Tokens, Directives, ConditionalDirectives, Comments;
+  bool IncludeComments = false, LogPreprocessor = false;
   std::string TokenDump;
 };
 llvm::json::Object location(SourceRange Range, SourceManager &Manager, const LangOptions &Language) {
@@ -187,7 +188,34 @@ public:
     if (Name.getLocation().isInvalid() || !Manager.isWrittenInMainFile(Manager.getExpansionLoc(Name.getLocation()))) return;
     auto Entry = location(SourceRange(Name.getLocation()), Manager, PreprocessorRef.getLangOpts());
     Entry["kind"] = Kind.str(); Entry["name"] = PreprocessorRef.getSpelling(Name);
+    if (Output->LogPreprocessor)
+      llvm::errs() << *Entry.getString("file") << ":" << *Entry.getInteger("line")
+                   << ": #" << Kind << " " << *Entry.getString("name") << "\n";
     Output->Directives.push_back(std::move(Entry));
+  }
+  void conditional(SourceLocation Position, SourceRange Condition, llvm::StringRef Kind) {
+    auto &Manager = PreprocessorRef.getSourceManager();
+    if (Position.isInvalid() || !Manager.isWrittenInMainFile(Manager.getExpansionLoc(Position))) return;
+    auto Entry = location(Condition, Manager, PreprocessorRef.getLangOpts());
+    Entry["kind"] = Kind.str();
+    Entry["condition"] = *Entry.getString("code");
+    Entry["line"] = Manager.getExpansionLineNumber(Position);
+    if (Output->LogPreprocessor)
+      llvm::errs() << *Entry.getString("file") << ":" << *Entry.getInteger("line")
+                   << ": #" << Kind << " " << *Entry.getString("condition") << "\n";
+    Output->ConditionalDirectives.push_back(std::move(Entry));
+  }
+  void If(SourceLocation Position, SourceRange Condition, ConditionValueKind) override {
+    conditional(Position, Condition, "if");
+  }
+  void Elif(SourceLocation Position, SourceRange Condition, ConditionValueKind, SourceLocation) override {
+    conditional(Position, Condition, "elif");
+  }
+  void Ifdef(SourceLocation Position, const Token &Name, const MacroDefinition &) override {
+    conditional(Position, SourceRange(Name.getLocation()), "ifdef");
+  }
+  void Ifndef(SourceLocation Position, const Token &Name, const MacroDefinition &) override {
+    conditional(Position, SourceRange(Name.getLocation()), "ifndef");
   }
   void MacroDefined(const Token &Name, const MacroDirective *) override { directive(Name, "define"); }
   void MacroUndefined(const Token &Name, const MacroDefinition &, const MacroDirective *) override { directive(Name, "undef"); }
@@ -213,6 +241,25 @@ public:
       }
     }
     Entry["replacement"] = std::move(Replacement); Output->Macros.push_back(std::move(Entry));
+  }
+};
+class CommentEvidence : public CommentHandler {
+  std::shared_ptr<Evidence> Output;
+public:
+  explicit CommentEvidence(std::shared_ptr<Evidence> Destination) : Output(std::move(Destination)) {}
+  bool HandleComment(Preprocessor &Processor, SourceRange Range) override {
+    auto &Manager = Processor.getSourceManager();
+    if (!Manager.isWrittenInMainFile(Range.getBegin())) return false;
+    unsigned Begin = Manager.getFileOffset(Range.getBegin());
+    unsigned End = Manager.getFileOffset(Range.getEnd());
+    auto Buffer = Manager.getBufferData(Manager.getFileID(Range.getBegin()));
+    if (End < Begin || End > Buffer.size()) llvm::report_fatal_error("Clang CPG: invalid comment range");
+    Output->Comments.push_back(llvm::json::Object{
+      {"file", Manager.getFilename(Range.getBegin()).str()}, {"offset", Begin}, {"end", End},
+      {"line", Manager.getSpellingLineNumber(Range.getBegin())},
+      {"column", Manager.getSpellingColumnNumber(Range.getBegin())},
+      {"code", Buffer.slice(Begin, End).str()}});
+    return false;
   }
 };
 class Visitor : public RecursiveASTVisitor<Visitor> {
@@ -330,6 +377,8 @@ public:
     Stream << ",\"compiler_graph\":" << llvm::formatv("{0}", llvm::json::Value(NativeEvidenceGraph(Context).capture()));
     Stream << ",\"nodes\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Nodes)));
     Stream << ",\"macro_directives\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Directives)));
+    Stream << ",\"conditional_directives\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->ConditionalDirectives)));
+    Stream << ",\"comments\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Comments)));
     Stream << ",\"macros\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Macros)));
     Stream << ",\"tokens\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Output->Tokens)));
     Stream << ",\"predefines\":" << llvm::formatv("{0}", llvm::json::Value(Processor.getPredefines()));
@@ -339,13 +388,24 @@ public:
 };
 class Action : public PluginASTAction {
   std::shared_ptr<Evidence> Output = std::make_shared<Evidence>(); std::string Destination;
+  std::unique_ptr<CommentEvidence> Comments;
   bool ParseArgs(const CompilerInstance &, const std::vector<std::string> &Arguments) override {
-    if (Arguments.size() != 1 || Arguments[0].empty()) return false;
-    Destination = Arguments[0]; return true;
+    if (Arguments.empty() || Arguments[0].empty()) return false;
+    Destination = Arguments[0];
+    for (size_t Index = 1; Index < Arguments.size(); ++Index) {
+      if (Arguments[Index] == "include-comments") Output->IncludeComments = true;
+      else if (Arguments[Index] == "log-preprocessor") Output->LogPreprocessor = true;
+      else { llvm::errs() << "Clang CPG: unsupported plugin argument: " << Arguments[Index] << "\n"; return false; }
+    }
+    return true;
   }
   std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &Compiler, llvm::StringRef) override {
     Preprocessor &Processor = Compiler.getPreprocessor();
     Processor.addPPCallbacks(std::make_unique<MacroEvidence>(Processor, Output));
+    if (Output->IncludeComments) {
+      Comments = std::make_unique<CommentEvidence>(Output);
+      Processor.addCommentHandler(Comments.get());
+    }
     Processor.setTokenWatcher([Data = Output, &Processor](const Token &Part) {
       if (Part.isAnnotation()) return;
       // Use Clang's token spelling/location APIs for the existing strict token

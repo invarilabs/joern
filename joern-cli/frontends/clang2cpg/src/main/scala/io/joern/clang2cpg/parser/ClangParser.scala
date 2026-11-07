@@ -41,39 +41,24 @@ object ClangParser {
 
   /** Runs one explicitly configured native frontend. A compiler failure never selects CDT. */
   def capture(config: Config): ClangEvidence = {
-    val source = Paths.get(config.inputPath).toRealPath()
-    require(
-      Files.isRegularFile(source) && source.toString.endsWith(".c"),
-      "Clang prototype requires one explicit .c translation unit; directory mode is not implemented"
-    )
-    def required(value: Option[String], option: String): Path =
-      Paths
-        .get(value.getOrElse(throw new IllegalArgumentException(s"Clang requires $option")))
-        .toAbsolutePath
-        .normalize()
-    val commandFile = required(config.clangCommand, "--clang-command")
-    val plugin      = required(config.clangPlugin, "--clang-plugin")
-    val directory   = required(config.clangEvidenceDir, "--clang-evidence-dir")
-    require(
-      Files.isRegularFile(commandFile) && Files.isRegularFile(plugin),
-      "Clang command JSON or matching exporter library is missing; configure explicit existing files"
-    )
+    val inputs = ClangInputs.plan(config)
+    require(inputs.size == 1, "capture(config) requires one translation unit; use the planned per-TU capture API for repositories")
+    capture(inputs.head, ClangInputs.plugin(config), ClangInputs.evidenceDirectory(config), config)
+  }
+
+  def capture(input: ClangInput, plugin: Path, directory: Path, config: Config): ClangEvidence = {
+    val source = input.source
+    val selected = input.command
     require(!Files.exists(directory), s"Clang evidence path already exists: $directory; select a new directory")
-    val selected = ujson.read(Files.readString(commandFile)).arr.toSeq.map(_.str)
-    require(
-      selected.size >= 2 && selected.last == source.toString,
-      "Clang command must end with the exact selected absolute source path"
-    )
+    require(selected.size >= 2 && selected.last == source.toString, "Clang command must end with the exact selected absolute source path")
     val compiler = Paths.get(selected.head)
-    require(
-      compiler.isAbsolute && Files.isRegularFile(compiler) && Files.isExecutable(compiler),
-      "Clang command requires an explicit absolute compiler executable"
-    )
-    require(
-      !selected.exists(value => Set("-o", "-c", "-S", "-emit-ast", "-fsyntax-only", "-Xclang")(value)),
-      "Clang command must contain only the compiler, build flags and source; capture/output options are owned by the parser"
-    )
-    val protectedInputs = Seq(source, compiler, commandFile, plugin).map(path => path -> digest(path))
+    require(compiler.isAbsolute && Files.isRegularFile(compiler) && Files.isExecutable(compiler),
+      "Clang command requires an explicit absolute compiler executable")
+    require(!selected.exists(value => Set("-o", "-c", "-S", "-emit-ast", "-fsyntax-only")(value)),
+      "Clang command contains competing capture/output flags; remove them from the explicit command")
+    require(!selected.exists(value => Set("-load", "-plugin", "-add-plugin")(value) || value.startsWith("-fplugin")),
+      "External compiler plugins are unsupported in the capture command; configure only the matching exporter")
+    val protectedInputs = (Seq(source, compiler, plugin) ++ input.protectedInputs).distinct.map(path => path -> digest(path))
     Files.createDirectories(directory)
     val documentPath = directory.resolve("clang.json")
     val command      = selected.dropRight(1) ++ Seq(
@@ -91,13 +76,15 @@ object ClangParser {
       "-Xclang",
       "-plugin-arg-clang-cpg",
       "-Xclang",
-      documentPath.toString,
-      source.toString
-    )
+      documentPath.toString
+    ) ++ Seq(
+      Option.when(config.includeComments)("include-comments"),
+      Option.when(config.logPreprocessor)("log-preprocessor")
+    ).flatten.flatMap(value => Seq("-Xclang", "-plugin-arg-clang-cpg", "-Xclang", value)) :+ source.toString
     Files.writeString(directory.resolve("command.json"), ujson.write(command, indent = 2))
     val started = System.nanoTime()
     val process = new ProcessBuilder(command.asJava)
-      .directory(source.getParent.toFile)
+      .directory(input.directory.toFile)
       .redirectOutput(directory.resolve("compiler.stdout").toFile)
       .redirectError(directory.resolve("compiler.log").toFile)
       .start()
@@ -114,6 +101,7 @@ object ClangParser {
         indent = 2
       )
     )
+    if (config.logProblems) System.err.print(Files.readString(directory.resolve("compiler.log")))
     require(
       process.exitValue() == 0 && Files.isRegularFile(documentPath),
       s"Clang frontend failed or did not emit complete evidence; inspect ${directory.resolve("compiler.log")}"
