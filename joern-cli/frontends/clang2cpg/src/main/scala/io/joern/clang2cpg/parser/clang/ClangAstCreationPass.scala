@@ -564,11 +564,20 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           result
         }
       case "InitListExpr" =>
-        require(
-          !original.obj.contains("array_filler"),
-          "Clang array filler normalization is not implemented; explicit support is required"
-        )
-        call(original, "<operator>.arrayInitializer", operands.map(expression))
+        original.obj.get("array_filler") match {
+          case None => call(original, "<operator>.arrayInitializer", operands.map(expression))
+          case Some(value) =>
+            val values = value.arr.toSeq
+            require(values.nonEmpty && operands.isEmpty, "Clang array initializer has ambiguous filler operands")
+            val filler = values.head
+            require(kind(filler) == "ImplicitValueInitExpr", s"Unsupported Clang array filler: ${kind(filler)}")
+            val result = call(original, "<operator>.arrayInitializer", values.tail.map(expression))
+            tag(result, "clang.arrayFiller", ujson.write(ujson.Obj(
+              "kind" -> kind(filler), "type" -> info(original)("semantic_type"),
+              "element_type" -> info(filler)("semantic_type"), "explicit_elements" -> values.tail.size
+            )))
+            result
+        }
       case "ImplicitValueInitExpr" => call(original, "<operator>.implicitValueInit", Seq.empty)
       case "CompoundLiteralExpr"   => call(original, "<operator>.compoundLiteral", operands.map(expression))
       case other                   =>
@@ -718,6 +727,9 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
     builder = diffGraph
     index(document("ast"))
     declarations.values.foreach(info)
+    declarations.values.filter(inMain).find(node => kind(node).startsWith("CXX")).foreach { node =>
+      throw new IllegalArgumentException(s"Unsupported Clang declaration ${kind(node)}: ${text(node)}; native C++ graph support is required")
+    }
     namespace(graphFilename(evidence.source.toString))
     registerTypes()
     val registeredMethods                       = registerMethods()

@@ -47,6 +47,15 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "reject unsupported C++ declarations instead of silently producing an empty graph" in {
+      val (directory, config) = setup("struct A {int f() {return 1;}};")
+      Files.writeString(directory.resolve("command.json"), ujson.write(Seq(
+        sys.env("CLANG_CPG_COMPILER"), "-x", "c++", "-std=c++17", directory.resolve("sample.c").toString
+      )))
+      val failure = new Clang2Cpg().createCpg(config).failed.get
+      Iterator.iterate(failure: Throwable)(_.getCause).takeWhile(_ != null).map(_.toString).mkString(" ") should include("Unsupported Clang declaration CXX")
+    }
+
     "retain source file content only when explicitly requested" in {
       val code = "int f(void) {return 1;}"
       val (_, config) = setup(code)
@@ -542,14 +551,17 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       try graph.member.nameExact("temporary").size shouldBe 0
       finally graph.close()
     }
-    "reject unsupported array fillers rather than dropping initialized elements" in {
-      val (_, config) = setup("int values[4]={1}; int read(void) {return values[0];}")
-      val failure     = new Clang2Cpg().createCpg(config).failed.get
-      Iterator
-        .iterate(failure: Throwable)(_.getCause)
-        .takeWhile(_ != null)
-        .map(_.toString)
-        .mkString(" ") should include("array filler")
+    "retain explicit array elements and compiler-provided implicit fill evidence" in {
+      withGraph("int values[4]={1}; int read(void) {return values[0];}") { (graph, _) =>
+        val initializer = graph.call.nameExact("<operator>.arrayInitializer").head
+        initializer.argument.code.toList shouldBe List("1")
+        val fill = initializer._taggedByOut.collect {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.arrayFiller" => ujson.read(tag.value)
+        }.toList
+        fill.size shouldBe 1
+        fill.head("type")("extent").num.toInt shouldBe 4
+        fill.head("kind").str shouldBe "ImplicitValueInitExpr"
+      }
     }
     "reject reuse after a source change" in {
       val (directory, config) = setup("int value(void) {return 1;}")
