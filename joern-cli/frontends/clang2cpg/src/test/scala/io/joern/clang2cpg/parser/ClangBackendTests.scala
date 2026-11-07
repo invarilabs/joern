@@ -667,7 +667,7 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       Files.readString(directory.resolve("evidence/compiler.log")) should include("error:")
     }
     "reject unsupported executable syntax instead of emitting UNKNOWN or dropping it" in {
-      val (_, config) = setup("void unsupported(void) {asm volatile (\"\");}")
+      val (_, config) = setup("void unsupported(void) {goto *&&done;done:;}")
       val failure     = new Clang2Cpg().createCpg(config).failed.get
       failure.toString should include("Unsupported Clang")
     }

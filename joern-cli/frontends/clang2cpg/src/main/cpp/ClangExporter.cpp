@@ -557,7 +557,19 @@ public:
         Entry["semantic_type"] = semanticType(Expression->getType(), Context);
       }
     }
-    if (auto Assembly = dyn_cast<GCCAsmStmt>(Statement)) Entry["gcc_asm"] = gccAsmEvidence(Assembly, Context);
+    if (auto Assembly = dyn_cast<GCCAsmStmt>(Statement)) {
+      Entry["gcc_asm"] = gccAsmEvidence(Assembly, Context);
+      for (unsigned Index = 0; Index < Assembly->getNumLabels(); ++Index) {
+        const auto *Label = Assembly->getLabelExpr(Index);
+        if (!Label || Label->getType().isNull() || !Label->getLabel())
+          llvm::report_fatal_error("Clang CPG: assembly goto label lacks compiler expression/type/declaration");
+        auto LabelEntry = location(Label->getSourceRange(), Context.getSourceManager(), Context.getLangOpts());
+        LabelEntry["type"] = typeName(Label->getType(), Context);
+        LabelEntry["semantic_type"] = semanticType(Label->getType(), Context);
+        LabelEntry["label_declaration"] = identity(Label->getLabel());
+        Output.Nodes[identity(Label)] = std::move(LabelEntry);
+      }
+    }
     if (auto Trait = dyn_cast<TypeTraitExpr>(Statement)) {
       if (Trait->isTypeDependent() || Trait->isValueDependent())
         llvm::report_fatal_error("Clang CPG: type trait has a dependent compiler result");

@@ -853,7 +853,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val arguments = assembly("outputs").arr.toSeq ++ assembly("inputs").arr.toSeq
         val branches = assembly("labels").arr.toSeq
         val nodes = operands.groupBy(identity)
-        val expected = (arguments ++ branches).map(_("expression").str)
+        val expected = arguments.map(_("expression").str)
         require(expected.distinct.size == expected.size && nodes.keySet == expected.toSet,
           "Clang assembly operand identities disagree")
         val result = NewCall().name("<operator>.asm").methodFullName("<operator>.asm")
@@ -868,7 +868,13 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           require(matching.size == 1, "Clang assembly operand is ambiguous")
           argument(result, expression(matching.head), index + 1)
         }
-        branches.foreach(branch => pendingAssemblyGotos += result -> branch("declaration").str)
+        branches.foreach { branch =>
+          val label = metadata.getOrElse(branch("expression").str,
+            throw new IllegalArgumentException("Clang assembly label lacks native generated-expression evidence"))
+          require(label("label_declaration").str == branch("declaration").str,
+            "Clang assembly label declaration witnesses disagree")
+          pendingAssemblyGotos += result -> branch("declaration").str
+        }
         Seq(result)
       case "BreakStmt" | "ContinueStmt" =>
         val category = if (kind(original) == "BreakStmt") ControlStructureTypes.BREAK else ControlStructureTypes.CONTINUE
