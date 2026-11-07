@@ -47,6 +47,23 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "use compiler-evaluated type traits without evaluating their type operands" in {
+      withGraph("typedef int Count; int bump(void); int same(void){return __builtin_types_compatible_p(Count,__typeof__(bump()));} int different(void){return __builtin_types_compatible_p(int,double);}") { (graph, _) =>
+        val traits = graph.literal.filter(_._taggedByOut.exists {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag => tag.name == "clang.typeTrait"
+          case _ => false
+        }).toList
+        traits.map(_.code).sorted shouldBe List("0", "1")
+        traits.map(_.typeFullName).distinct shouldBe List("int")
+        graph.call.nameExact("bump").size shouldBe 0
+        traits.foreach { literal =>
+          literal._taggedByOut.collect {
+            case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.typeTrait" => ujson.read(tag.value)
+          }.toList.head("operands_unevaluated").bool shouldBe true
+        }
+      }
+    }
+
     "preserve variadic extraction operand and compiler-selected result type" in {
       withGraph("#include <stdarg.h>\nint take(int count,...){va_list args;va_start(args,count);int result=va_arg(args,int);va_end(args);return result;}") { (graph, _) =>
         val extract = graph.call.nameExact("<operator>.vaArg").head

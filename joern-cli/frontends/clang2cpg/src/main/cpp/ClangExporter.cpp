@@ -7,6 +7,7 @@
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/Basic/TypeTraits.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendPluginRegistry.h"
 #include "clang/Index/USRGeneration.h"
@@ -522,6 +523,22 @@ public:
         Entry["type"] = typeName(Expression->getType(), Context);
         Entry["semantic_type"] = semanticType(Expression->getType(), Context);
       }
+    }
+    if (auto Trait = dyn_cast<TypeTraitExpr>(Statement)) {
+      if (Trait->isTypeDependent() || Trait->isValueDependent())
+        llvm::report_fatal_error("Clang CPG: type trait has a dependent compiler result");
+      llvm::json::Array Arguments;
+      for (const TypeSourceInfo *Argument : Trait->getArgs()) {
+        if (!Argument || Argument->getType().isNull())
+          llvm::report_fatal_error("Clang CPG: type trait lacks a compiler operand type");
+        Arguments.push_back(llvm::json::Object{
+          {"spelling", Argument->getType().getAsString(Context.getPrintingPolicy())},
+          {"semantic_type", semanticType(Argument->getType(), Context)}});
+      }
+      Entry["type_trait"] = llvm::json::Object{
+        {"kind", static_cast<int64_t>(Trait->getTrait())},
+        {"name", getTraitName(Trait->getTrait())}, {"spelling", getTraitSpelling(Trait->getTrait())},
+        {"value", Trait->getValue()}, {"arguments", std::move(Arguments)}, {"operands_unevaluated", true}};
     }
     if (auto Atomic = dyn_cast<AtomicExpr>(Statement)) Entry["atomic"] = atomicEvidence(Atomic);
     if (auto Selection = dyn_cast<GenericSelectionExpr>(Statement)) {

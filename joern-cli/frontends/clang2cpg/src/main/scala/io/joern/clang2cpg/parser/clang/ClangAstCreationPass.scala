@@ -526,6 +526,22 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val target = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
         add(target)
         call(original, Operators.cast, Seq(target, expression(operands.head)))
+      case "TypeTraitExpr" =>
+        val traitValue = info(original)("type_trait")
+        require(traitValue("operands_unevaluated").bool, "Clang type trait has executable operands")
+        require(traitValue("arguments").arr.nonEmpty, "Clang type trait lacks compiler operand types")
+        val booleanResult = info(original)("semantic_type")("kind").str == "Bool"
+        val value = if (booleanResult) traitValue("value").bool.toString else if (traitValue("value").bool) "1" else "0"
+        val literal = NewLiteral().code(value).typeFullName(valueType(original))
+        annotate(literal, original)
+        original.obj.get("value") match {
+          case Some(witness) => require(witness.strOpt.getOrElse(ujson.write(witness)) == value,
+            "Clang type trait compiler value witnesses disagree")
+          case None => tag(literal, "clang.value", value)
+        }
+        tag(literal, "clang.typeTrait", ujson.write(traitValue))
+        add(literal)
+        literal
       case "VAArgExpr" =>
         require(operands.size == 1, "Clang variadic extraction requires exactly one list operand")
         val requestedType = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
