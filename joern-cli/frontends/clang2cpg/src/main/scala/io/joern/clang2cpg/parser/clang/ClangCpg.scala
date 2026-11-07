@@ -18,6 +18,7 @@ object ClangCpg {
       new MetaDataPass(graph, Languages.NEWC, root.toString).createAndApply()
       val bindings = mutable.LinkedHashMap.empty[String, String]
       val strings = new ClangStringPool
+      val tags = new ClangTagPool
       val inputsAtCapture = mutable.LinkedHashMap.empty[String, String]
       val aliasesAtCapture = mutable.LinkedHashMap.empty[String, String]
       val plugin = ClangInputs.plugin(config)
@@ -45,8 +46,9 @@ object ClangCpg {
         }
         val graphStarted = System.nanoTime()
         val documentBytes = Files.size(captureDirectory.resolve("clang.json"))
-        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent, config.embedNativeEvidence, strings)
+        val syntax = new ClangAstCreationPass(graph, evidence, if (repository) Some(root) else None, config.skipFunctionBodies, !config.disableFileContent, config.embedNativeEvidence, strings, tags)
         syntax.createAndApply()
+        syntax.publishTags()
         syntax.sourceTypeBindings.foreach { case (key, value) =>
           require(!bindings.contains(key) || bindings(key) == value, s"Conflicting compiler type binding: $key")
           bindings(key) = value

@@ -31,6 +31,7 @@ std::string usr(const NamedDecl *Declaration) {
     llvm::report_fatal_error("Clang CPG: required declaration lacks a USR");
   return Buffer.str().str();
 }
+#include "ClangEnumIdentity.h"
 std::string typeName(QualType Type, ASTContext &Context) {
   if (Type.isNull()) llvm::report_fatal_error("Clang CPG: required type is null");
   QualType Canonical = Context.getCanonicalType(Type);
@@ -39,7 +40,7 @@ std::string typeName(QualType Type, ASTContext &Context) {
   if (Canonical.isVolatileQualified()) Prefix += "volatile ";
   if (Canonical.isRestrictQualified()) Prefix += "restrict ";
   if (auto Record = dyn_cast<RecordType>(Shape)) return Prefix + "clang:" + usr(Record->getDecl());
-  if (auto Enum = dyn_cast<EnumType>(Shape)) return Prefix + "clang:" + usr(Enum->getDecl());
+  if (auto Enum = dyn_cast<EnumType>(Shape)) return Prefix + "clang:" + enumIdentity(Enum->getDecl(), Context);
   if (auto Reference = dyn_cast<ReferenceType>(Shape))
     return typeName(Reference->getPointeeType(), Context) + (isa<LValueReferenceType>(Shape) ? "&" : "&&");
   if (auto Member = dyn_cast<MemberPointerType>(Shape))
@@ -113,6 +114,8 @@ llvm::json::Object semanticType(QualType Type, ASTContext &Context) {
     Result["complete"] = Declaration->getDefinition() != nullptr;
   } else if (auto Enum = dyn_cast<EnumType>(Shape)) {
     Result["kind"] = "Enum"; Result["declaration_usr"] = usr(Enum->getDecl());
+    const auto StableIdentity = enumIdentity(Enum->getDecl(), Context);
+    if (StableIdentity != usr(Enum->getDecl())) Result["declaration_identity"] = StableIdentity;
     Result["declaration_name"] = Enum->getDecl()->getNameAsString();
   } else if (auto Array = dyn_cast<ArrayType>(Shape)) {
     Result["element"] = semanticType(Array->getElementType(), Context);
@@ -504,7 +507,7 @@ public:
         Entry["name"] = Record->getTypedefNameForAnonDecl()->getNameAsString();
     }
     if (auto Enum = dyn_cast<EnumDecl>(Declaration)) {
-      Entry["type"] = "clang:" + usr(Enum);
+      Entry["type"] = "clang:" + enumIdentity(Enum, Context);
       Entry["semantic_type"] = semanticType(Context.getEnumType(Enum), Context);
     }
     if (auto Function = dyn_cast<FunctionDecl>(Declaration)) {
@@ -690,6 +693,7 @@ public:
   }
   void HandleTranslationUnit(ASTContext &Context) override {
     if (Context.getDiagnostics().hasErrorOccurred()) return;
+    ScopedEnumIdentities EnumIdentities(Context);
     Visitor Collector(Context, *Output); Collector.TraverseDecl(Context.getTranslationUnitDecl());
     llvm::json::Object Inputs;
     SourceManager &Manager = Context.getSourceManager();
