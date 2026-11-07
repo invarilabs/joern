@@ -412,6 +412,39 @@ llvm::json::Object atomicEvidence(const AtomicExpr *Atomic) {
   return llvm::json::Object{{"op_code", static_cast<int64_t>(Atomic->getOp())},
                            {"name", Atomic->getOpAsString().str()}, {"operands", std::move(Operands)}};
 }
+llvm::json::Object gccAsmEvidence(const GCCAsmStmt *Assembly, ASTContext &Context) {
+  const auto *Template = Assembly->getAsmString();
+  if (!Template || Template->getCharByteWidth() != 1)
+    llvm::report_fatal_error("Clang CPG: GCC assembly lacks a compiler narrow-string template");
+  llvm::json::Array Outputs, Inputs, Clobbers, Labels;
+  for (unsigned Index = 0; Index < Assembly->getNumOutputs(); ++Index) {
+    const Expr *Operand = Assembly->getOutputExpr(Index);
+    if (!Operand || Operand->getType().isNull()) llvm::report_fatal_error("Clang CPG: GCC assembly output lacks a typed compiler expression");
+    Outputs.push_back(llvm::json::Object{{"name", Assembly->getOutputName(Index).str()},
+      {"constraint", Assembly->getOutputConstraint(Index).str()}, {"read_write", Assembly->isOutputPlusConstraint(Index)},
+      {"expression", identity(Operand)}, {"semantic_type", semanticType(Operand->getType(), Context)}});
+  }
+  for (unsigned Index = 0; Index < Assembly->getNumInputs(); ++Index) {
+    const Expr *Operand = Assembly->getInputExpr(Index);
+    if (!Operand || Operand->getType().isNull()) llvm::report_fatal_error("Clang CPG: GCC assembly input lacks a typed compiler expression");
+    Inputs.push_back(llvm::json::Object{{"name", Assembly->getInputName(Index).str()},
+      {"constraint", Assembly->getInputConstraint(Index).str()}, {"expression", identity(Operand)},
+      {"semantic_type", semanticType(Operand->getType(), Context)}});
+  }
+  for (unsigned Index = 0; Index < Assembly->getNumClobbers(); ++Index)
+    Clobbers.push_back(Assembly->getClobber(Index).str());
+  for (unsigned Index = 0; Index < Assembly->getNumLabels(); ++Index) {
+    const auto *Expression = Assembly->getLabelExpr(Index);
+    if (!Expression || !Expression->getLabel()) llvm::report_fatal_error("Clang CPG: assembly goto lacks a compiler label target");
+    Labels.push_back(llvm::json::Object{{"name", Assembly->getLabelName(Index).str()},
+      {"expression", identity(Expression)}, {"declaration", identity(Expression->getLabel())}});
+  }
+  return llvm::json::Object{{"result_kind", "statement"}, {"result_type", semanticType(Context.VoidTy, Context)},
+    {"dialect", "gcc"}, {"template", Template->getString().str()},
+    {"simple", Assembly->isSimple()}, {"volatile", Assembly->isVolatile()}, {"goto", Assembly->isAsmGoto()},
+    {"outputs", std::move(Outputs)}, {"inputs", std::move(Inputs)},
+    {"clobbers", std::move(Clobbers)}, {"labels", std::move(Labels)}};
+}
 class Visitor : public RecursiveASTVisitor<Visitor> {
   ASTContext &Context; Evidence &Output;
   std::set<const Expr *> AssertionMessages;
@@ -524,6 +557,7 @@ public:
         Entry["semantic_type"] = semanticType(Expression->getType(), Context);
       }
     }
+    if (auto Assembly = dyn_cast<GCCAsmStmt>(Statement)) Entry["gcc_asm"] = gccAsmEvidence(Assembly, Context);
     if (auto Trait = dyn_cast<TypeTraitExpr>(Statement)) {
       if (Trait->isTypeDependent() || Trait->isValueDependent())
         llvm::report_fatal_error("Clang CPG: type trait has a dependent compiler result");

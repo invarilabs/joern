@@ -28,6 +28,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
   private val methodBodies              = mutable.Map.empty[NewMethod, NewBlock]
   private val pendingReferences         = mutable.ArrayBuffer.empty[(NewNode, String)]
   private val pendingGotos              = mutable.ArrayBuffer.empty[(NewNode, String)]
+  private val pendingAssemblyGotos      = mutable.ArrayBuffer.empty[(NewCall, String)]
   private val labels                    = mutable.LinkedHashMap.empty[String, NewJumpTarget]
   private var builder: DiffGraphBuilder = null
   private val added = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap[NewNode, java.lang.Boolean]())
@@ -845,6 +846,30 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
           }
         }
         Seq(control)
+      case "GCCAsmStmt" =>
+        val assembly = info(original)("gcc_asm")
+        require(assembly("result_kind").str == "statement" && assembly("result_type")("kind").str == "Void",
+          "Clang assembly requires its explicit no-value statement result")
+        val arguments = assembly("outputs").arr.toSeq ++ assembly("inputs").arr.toSeq
+        val branches = assembly("labels").arr.toSeq
+        val nodes = operands.groupBy(identity)
+        val expected = (arguments ++ branches).map(_("expression").str)
+        require(expected.distinct.size == expected.size && nodes.keySet == expected.toSet,
+          "Clang assembly operand identities disagree")
+        val result = NewCall().name("<operator>.asm").methodFullName("<operator>.asm")
+          .dispatchType(DispatchTypes.STATIC_DISPATCH).code(text(original))
+          .typeFullName(assembly("result_type")("canonical_identity").str)
+        annotate(result, original)
+        tag(result, "clang.semanticType", ujson.write(assembly("result_type")))
+        tag(result, "clang.gccAsm", ujson.write(assembly))
+        add(result)
+        arguments.zipWithIndex.foreach { case (operand, index) =>
+          val matching = nodes(operand("expression").str)
+          require(matching.size == 1, "Clang assembly operand is ambiguous")
+          argument(result, expression(matching.head), index + 1)
+        }
+        branches.foreach(branch => pendingAssemblyGotos += result -> branch("declaration").str)
+        Seq(result)
       case "BreakStmt" | "ContinueStmt" =>
         val category = if (kind(original) == "BreakStmt") ControlStructureTypes.BREAK else ControlStructureTypes.CONTINUE
         val control = NewControlStructure().code(text(original)).controlStructureType(category).parserTypeName(kind(original))
@@ -1014,6 +1039,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       val label = NewJumpLabel().name(destination.name).code(destination.name)
       ast(origin, label, 1)
       builder.addEdge(origin, label, EdgeTypes.JUMP_ARGUMENT)
+    }
+    pendingAssemblyGotos.foreach { case (origin, target) =>
+      val destination = labels.getOrElse(target,
+        throw new IllegalArgumentException(s"Clang assembly goto target missing: $target"))
+      builder.addEdge(origin, destination, EdgeTypes.CFG)
     }
     tag(
       namespace(graphFilename(evidence.source.toString)),

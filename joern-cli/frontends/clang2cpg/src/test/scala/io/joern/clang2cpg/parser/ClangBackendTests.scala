@@ -47,6 +47,27 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain compiler assembly-goto targets as possible CFG branches" in {
+      withGraph("""int branch(void){__asm__ goto(""::::escape);return 0;escape:return 1;}""") { (graph, _) =>
+        val assembly = graph.call.nameExact("<operator>.asm").head
+        assembly.cfgNext.isJumpTarget.name.toList should contain("escape")
+      }
+    }
+
+    "retain inline assembly operand roles without discarding updates or clobbers" in {
+      withGraph("""int update(int x,int y){__asm__ volatile("add %1,%0" : "+r"(x) : "r"(y) : "cc", "memory");return x;}""") { (graph, _) =>
+        val assembly = graph.call.nameExact("<operator>.asm").head
+        assembly.argument.code.toList shouldBe List("x", "y")
+        val facts = assembly._taggedByOut.collect {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.gccAsm" => ujson.read(tag.value)
+        }.toList.head
+        facts("outputs").arr.head("read_write").bool shouldBe true
+        facts("inputs").arr.head("constraint").str shouldBe "r"
+        facts("clobbers").arr.map(_.str).toList shouldBe List("cc", "memory")
+        facts("volatile").bool shouldBe true
+      }
+    }
+
     "use compiler-evaluated type traits without evaluating their type operands" in {
       withGraph("typedef int Count; int bump(void); int same(void){return __builtin_types_compatible_p(Count,__typeof__(bump()));} int different(void){return __builtin_types_compatible_p(int,double);}") { (graph, _) =>
         val traits = graph.literal.filter(_._taggedByOut.exists {
