@@ -13,6 +13,8 @@
 #include "clang/Index/USRGeneration.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/PPCallbacks.h"
+#include "clang/Lex/DirectoryLookup.h"
+#include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Preprocessor.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FileSystem.h"
@@ -161,7 +163,7 @@ llvm::json::Object semanticType(QualType Type, ASTContext &Context) {
 struct Evidence {
   llvm::json::Object Nodes;
   llvm::json::Array Macros, Tokens, Directives, ConditionalDirectives, Comments;
-  bool IncludeComments = false, LogPreprocessor = false, EmbedLegacyPayload = true;
+  bool IncludeComments = false, LogPreprocessor = false, EmbedLegacyPayload = true, IncludeSearchPaths = false;
   std::string TokenDump;
 };
 llvm::json::Object location(SourceRange Range, SourceManager &Manager, const LangOptions &Language, bool IncludeCode = true) {
@@ -642,6 +644,36 @@ public:
     Output.Nodes[identity(Statement)] = std::move(Entry); return true;
   }
 };
+llvm::json::Object includeSearchEvidence(const HeaderSearch &Search) {
+  llvm::json::Array Entries;
+  auto AddRange = [&](ConstSearchDirIterator Begin, ConstSearchDirIterator End,
+                      llvm::StringRef Group) {
+    for (auto Iterator = Begin; Iterator != End; ++Iterator) {
+      const DirectoryLookup &Lookup = *Iterator;
+      llvm::StringRef Kind;
+      switch (Lookup.getLookupType()) {
+      case DirectoryLookup::LT_NormalDir: Kind = "directory"; break;
+      case DirectoryLookup::LT_Framework: Kind = "framework"; break;
+      case DirectoryLookup::LT_HeaderMap: Kind = "header_map"; break;
+      default: llvm::report_fatal_error("Clang CPG: unsupported compiler include search entry kind");
+      }
+      const auto Path = Lookup.getName();
+      if (Path.empty()) llvm::report_fatal_error("Clang CPG: compiler include search entry has no path");
+      Entries.push_back(llvm::json::Object{{"path", Path.str()}, {"kind", Kind.str()}, {"group", Group.str()},
+        {"characteristic", static_cast<int64_t>(Lookup.getDirCharacteristic())}});
+    }
+  };
+  AddRange(Search.quoted_dir_begin(), Search.quoted_dir_end(), "quoted");
+  AddRange(Search.angled_dir_begin(), Search.angled_dir_end(), "angled");
+  AddRange(Search.system_dir_begin(), Search.system_dir_end(), "system");
+  if (Entries.size() != Search.search_dir_size())
+    llvm::report_fatal_error("Clang CPG: incomplete compiler include search range coverage");
+  llvm::SmallString<256> WorkingDirectory;
+  if (auto Error = llvm::sys::fs::current_path(WorkingDirectory))
+    llvm::report_fatal_error(llvm::Twine("Clang CPG: cannot read compiler working directory: ") + Error.message());
+  return llvm::json::Object{{"schema_version", 1}, {"compiler_owned", true},
+    {"working_directory", WorkingDirectory.str().str()}, {"entries", std::move(Entries)}};
+}
 class Consumer : public ASTConsumer {
   std::shared_ptr<Evidence> Output; std::string Destination; Preprocessor &Processor;
   std::unique_ptr<CommentEvidence> Comments;
@@ -704,6 +736,8 @@ public:
       Stream << ",\"predefines\":" << llvm::formatv("{0}", llvm::json::Value(Processor.getPredefines()));
       Stream << ",\"macro_names\":" << llvm::formatv("{0}", llvm::json::Value(std::move(MacroNames)));
     }
+    if (Output->IncludeSearchPaths)
+      Stream << ",\"include_search\":" << llvm::formatv("{0}", llvm::json::Value(includeSearchEvidence(Processor.getHeaderSearchInfo())));
     Stream << ",\"inputs\":" << llvm::formatv("{0}", llvm::json::Value(std::move(Inputs))) << "}\n";
   }
 };
@@ -716,6 +750,7 @@ class Action : public PluginASTAction {
       if (Arguments[Index] == "include-comments") Output->IncludeComments = true;
       else if (Arguments[Index] == "log-preprocessor") Output->LogPreprocessor = true;
       else if (Arguments[Index] == "direct-cpg-only") Output->EmbedLegacyPayload = false;
+      else if (Arguments[Index] == "include-search-paths") Output->IncludeSearchPaths = true;
       else { llvm::errs() << "Clang CPG: unsupported plugin argument: " << Arguments[Index] << "\n"; return false; }
     }
     return true;

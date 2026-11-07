@@ -13,7 +13,7 @@ The frontend exposes the stock c2cpg configuration surface:
 | `--include`, `--define` | Apply additional include directories and definitions to each translation unit. |
 | `--compilation-database` | Select translation units and their build commands from compile_commands.json. |
 | `--with-preprocessed-files` | Include `.i` files, preferring them over the corresponding unpreprocessed source. |
-| `--with-include-auto-discovery`, `--no-include-auto-discovery` | Control system include discovery through the selected compiler. |
+| `--with-include-auto-discovery`, `--no-include-auto-discovery` | Enable or disable reporting of the compiler’s actual configured include-search paths in `clang.includeSearch`. |
 | `--include-comments` | Emit compiler-recorded comments. |
 | `--log-problems` | Expose compiler diagnostics; retain diagnostics on failure. |
 | `--log-preprocessor` | Log compiler-recorded preprocessing events. |
@@ -48,3 +48,14 @@ The release gate is executable: run the affected frontend tests, then compare
 all protected generated DSL/TLA bytes and record the complete 414-file census
 with timings and explicit blockers. Do not infer a success count from an older
 run or from the number of accepted CLI options.
+
+## Compiler-native include search
+
+`--with-include-auto-discovery` records Clang’s ordered quoted, angled and system
+search entries, their directory/framework/header-map kind, compiler path, and
+compiler working directory for interpreting relative paths.
+It performs no external GCC probe and does not change the selected compile argv.
+`--no-include-auto-discovery` disables this optional report. Clang’s intrinsic
+header lookup remains governed by its compile command, including `-nostdinc`.
+Search entries describe configured lookup paths; per-inclusion source-directory
+lookup is handled by the compiler and is not an additional configured entry.

@@ -1069,6 +1069,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         )
       )
     )
+    document.obj.get("include_search").foreach(value =>
+      tag(namespace(graphFilename(evidence.source.toString)), "clang.includeSearch", ujson.write(value)))
     document.obj.get("comments").foreach(_.arr.foreach { original =>
       val comment = NewComment().code(original("code").str).filename(graphFilename(original("file").str))
         .lineNumber(original("line").num.toInt).columnNumber(original("column").num.toInt)

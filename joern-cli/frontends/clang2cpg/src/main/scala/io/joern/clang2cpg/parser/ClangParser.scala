@@ -29,6 +29,34 @@ object ClangParser {
   private[parser] def readDocument(input: java.io.InputStream): ujson.Value =
     try ujson.read(input) finally input.close()
 
+  private[parser] def validateIncludeSearch(document: ujson.Value, requested: Boolean): Unit = {
+    val fact = document.obj.get("include_search")
+    if (!requested) require(fact.isEmpty, "Clang exporter returned unrequested include search evidence")
+    else {
+      require(fact.exists(_.isInstanceOf[ujson.Obj]), "Clang exporter did not emit requested include search evidence")
+      val search = fact.get
+      require(search.obj.keySet == Set("schema_version", "compiler_owned", "working_directory", "entries") &&
+        search("schema_version") == ujson.Num(1) && search("compiler_owned") == ujson.Bool(true) &&
+        search("entries").isInstanceOf[ujson.Arr], "Clang include search schema is invalid")
+      require(search("working_directory").strOpt.exists(value => value.nonEmpty && Paths.get(value).isAbsolute),
+        "Clang include search working directory is missing or not absolute")
+      val groups = List("quoted", "angled", "system")
+      var previous = -1
+      search("entries").arr.foreach { entry =>
+        require(entry.isInstanceOf[ujson.Obj] && entry.obj.keySet == Set("path", "kind", "group", "characteristic"),
+          "Clang include search entry schema is invalid")
+        require(entry("path").strOpt.exists(_.nonEmpty), "Clang include search path is missing")
+        require(entry("kind").strOpt.exists(Set("directory", "framework", "header_map")), "Clang include search lookup kind is unsupported")
+        require(entry("group").strOpt.exists(groups.contains), "Clang include search group is unsupported")
+        val group = groups.indexOf(entry("group").str)
+        require(group >= previous, "Clang include search group order disagrees with the compiler contract")
+        previous = group
+        require(entry("characteristic").numOpt.exists(value => value >= 0 && value <= Int.MaxValue && value == value.toInt.toDouble),
+          "Clang include search characteristic is invalid")
+      }
+    }
+  }
+
   private[parser] final case class ProtectedInput(alias: Path, target: Path, sha256: String) {
     def validate(): Unit = {
       require(Files.isRegularFile(alias) && alias.toRealPath() == target,
@@ -67,7 +95,8 @@ object ClangParser {
     private[parser] val protectedInputs: Seq[ProtectedInput],
     private[parser] val artifactHashes: Seq[(Path, String)],
     private[parser] val commandHash: String,
-    private[parser] val embedNativeEvidence: Boolean
+    private[parser] val embedNativeEvidence: Boolean,
+    private[parser] val includeSearchPaths: Boolean = false
   )
 
   private def validateDisk(capture: DiskCapture): Unit = {
@@ -133,7 +162,8 @@ object ClangParser {
     ) ++ Seq(
       Option.when(!config.embedNativeEvidence)("direct-cpg-only"),
       Option.when(config.includeComments)("include-comments"),
-      Option.when(config.logPreprocessor)("log-preprocessor")
+      Option.when(config.logPreprocessor)("log-preprocessor"),
+      Option.when(config.includePathsAutoDiscovery)("include-search-paths")
     ).flatten.flatMap(value => Seq("-Xclang", "-plugin-arg-clang-cpg", "-Xclang", value)) :+ source.toString
     Files.writeString(directory.resolve("command.json"), ujson.write(command, indent = 2))
     val commandHash = digest(directory.resolve("command.json"))
@@ -174,7 +204,7 @@ object ClangParser {
         s"Clang did not emit required native evidence: $path; rebuild with the matching exporter")
     )
     val capture = DiskCapture(source, directory, selected, protectedInputs,
-      artifacts.map(path => path -> digest(path)), commandHash, config.embedNativeEvidence)
+      artifacts.map(path => path -> digest(path)), commandHash, config.embedNativeEvidence, config.includePathsAutoDiscovery)
     validateDisk(capture)
     capture
   }
@@ -196,6 +226,7 @@ object ClangParser {
       require(!document.obj.contains("compiler_graph") && !document.obj.contains("tokens"),
         "Direct CPG capture unexpectedly emitted legacy evidence; correct the producer")
     }
+    validateIncludeSearch(document, capture.includeSearchPaths)
     val evidence = ClangEvidence(source, directory, document)
     evidence.validate()
     validateDisk(capture)

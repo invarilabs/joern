@@ -102,7 +102,7 @@ object Frontend {
         .text("Preprocessor definition")
         .action((value, config) => config.withDefines(config.defines + value)),
       opt[Unit]("with-include-auto-discovery")
-        .text("Use the selected compiler's system include search discovery")
+        .text("Report compiler-native include search paths in the CPG")
         .action((_, config) => config.withIncludePathsAutoDiscovery(true)),
       opt[Unit]("no-include-auto-discovery")
         .hidden()
