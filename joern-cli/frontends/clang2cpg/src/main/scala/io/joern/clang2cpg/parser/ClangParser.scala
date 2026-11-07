@@ -25,6 +25,10 @@ final case class ClangEvidence(
 }
 
 object ClangParser {
+  /** Consume one native document with bounded parser input buffers; close even on malformed input. */
+  private[parser] def readDocument(input: java.io.InputStream): ujson.Value =
+    try ujson.read(input) finally input.close()
+
   private[parser] final case class ProtectedInput(alias: Path, target: Path, sha256: String) {
     def validate(): Unit = {
       require(Files.isRegularFile(alias) && alias.toRealPath() == target,
@@ -128,7 +132,7 @@ object ClangParser {
       s"Clang frontend failed or did not emit complete evidence; inspect ${directory.resolve("compiler.log")}"
     )
     protectedInputs.foreach(_.validate())
-    val document = ujson.read(Files.readString(documentPath))
+    val document = readDocument(Files.newInputStream(documentPath))
     require(
       document("schema_version").num == 1 && document("ast")("kind").str == "TranslationUnitDecl",
       "Clang exporter returned an unsupported or incomplete schema; use the matching exporter"
