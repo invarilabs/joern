@@ -29,6 +29,7 @@ object ClangCpg {
           bindings(key) = value
         }
         evidence.validate()
+        if (repository) ClangArchive.complete(captureDirectory)
       }
       new ClangTypeNodePass(graph, bindings.toMap).createAndApply()
     }

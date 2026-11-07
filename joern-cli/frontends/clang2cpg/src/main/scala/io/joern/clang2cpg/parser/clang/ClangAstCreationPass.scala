@@ -389,9 +389,10 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       )
       val name           = invocation("name").str
       val definitionFile = graphFilename(definition("file").str)
-      val fullName       = "clang:macro:" + definitionFile + ":" + definition(
+      val canonicalMacroName = "clang:macro:" + definitionFile + ":" + definition(
         "offset"
       ).num.toLong + ":" + name + ":expansion:" + offset.get
+      val fullName = scoped(canonicalMacroName)
       val method = NewMethod()
         .name(name)
         .fullName(fullName)
@@ -401,7 +402,7 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         .astParentFullName(definitionFile + ":<global>")
         .isExternal(true)
         .signature("")
-      tag(method, "clang.canonicalMethodFullName", fullName)
+      tag(method, "clang.canonicalMethodFullName", canonicalMacroName)
       ast(namespace(definitionFile), method, 1)
       ast(
         method,
@@ -838,7 +839,13 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
       "receipt"          -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("receipt.json"))),
       "compiler_command" -> ujson.read(java.nio.file.Files.readString(evidence.directory.resolve("command.json")))
     )
-    tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", ujson.write(nativePayload))
+    val payload = if (graphRoot.isEmpty) ujson.write(nativePayload) else {
+      val bytes = new java.io.ByteArrayOutputStream()
+      val gzip = new java.util.zip.GZIPOutputStream(bytes)
+      try gzip.write(ujson.write(nativePayload).getBytes(java.nio.charset.StandardCharsets.UTF_8)) finally gzip.close()
+      ujson.write(ujson.Obj("schema_version" -> 2, "encoding" -> "gzip+base64", "payload" -> java.util.Base64.getEncoder.encodeToString(bytes.toByteArray)))
+    }
+    tag(namespace(graphFilename(evidence.source.toString)), "clang.nativeEvidence", payload)
     // Ownership is allocated after executable nodes, preserving source-local IDs.
     emitted.toVector.filterNot(_.isInstanceOf[NewTag]).foreach(node =>
       tag(node, "clang.translationUnitSource", evidence.source.toString)
