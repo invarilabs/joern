@@ -526,6 +526,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         val target = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
         add(target)
         call(original, Operators.cast, Seq(target, expression(operands.head)))
+      case "VAArgExpr" =>
+        require(operands.size == 1, "Clang variadic extraction requires exactly one list operand")
+        val requestedType = NewTypeRef().code(valueType(original)).typeFullName(valueType(original))
+        add(requestedType)
+        call(original, "<operator>.vaArg", Seq(expression(operands.head), requestedType))
       case "AtomicExpr" =>
         val operation = info(original)("atomic")
         require(operation("name").str == original("name").str, "Clang atomic operation witnesses disagree")

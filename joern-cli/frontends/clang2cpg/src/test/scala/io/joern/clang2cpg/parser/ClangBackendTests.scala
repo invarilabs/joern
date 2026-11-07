@@ -47,6 +47,18 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "preserve variadic extraction operand and compiler-selected result type" in {
+      withGraph("#include <stdarg.h>\nint take(int count,...){va_list args;va_start(args,count);int result=va_arg(args,int);va_end(args);return result;}") { (graph, _) =>
+        val extract = graph.call.nameExact("<operator>.vaArg").head
+        extract.typeFullName shouldBe "int"
+        extract.argument.argumentIndex(1).isIdentifier.name.toList shouldBe List("args")
+        extract.argument.argumentIndex(2).isTypeRef.typeFullName.toList shouldBe List("int")
+        extract._taggedByOut.collect {
+          case tag: io.shiftleft.codepropertygraph.generated.nodes.Tag if tag.name == "clang.kind" => tag.value
+        }.toList should contain("VAArgExpr")
+      }
+    }
+
     "retain compiler-concatenated string values across source and macro spelling" in {
       withGraph("#define TAIL \"tail\"\nconst char *f(void){return \"head\" TAIL;}") { (graph, _) =>
         val literal = graph.literal.head
