@@ -787,7 +787,8 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
         annotate(local, original)
         add(local)
         bindings(identity(original)) = local
-        val initializers = operands.filterNot(node => kind(node).endsWith("Attr"))
+        // FullComment is declaration documentation, emitted separately from executable syntax.
+        val initializers = operands.filterNot(node => kind(node).endsWith("Attr") || kind(node) == "FullComment")
         require(initializers.size <= 1, s"Clang variable has unsupported declaration children: ${text(original)}")
         if (initializers.nonEmpty) declarationMacro(original, local)
         val assignments = initializers.map { initializer =>

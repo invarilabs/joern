@@ -47,6 +47,14 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "keep declaration documentation separate from executable initializer values" in {
+      withGraph("int read(void) { /*** local documentation ***/\n int value=3; return value; }") { (graph, _) =>
+        graph.local.nameExact("value").size shouldBe 1
+        val assignments = graph.call.nameExact("<operator>.assignment").toList
+        assignments.size shouldBe 1
+        assignments.head.argument(2).isLiteral.code.toList shouldBe List("3")
+      }
+    }
     "retain compiler assembly-goto targets as possible CFG branches" in {
       withGraph("""int branch(void){__asm__ goto(""::::escape);return 0;escape:return 1;}""") { (graph, _) =>
         val assembly = graph.call.nameExact("<operator>.asm").head
