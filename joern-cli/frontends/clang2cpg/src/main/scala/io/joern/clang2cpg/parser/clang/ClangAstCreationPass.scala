@@ -505,6 +505,11 @@ class ClangAstCreationPass(graph: Cpg, evidence: ClangEvidence, graphRoot: Optio
             .getOrElse(opcode, throw new IllegalArgumentException(s"Unsupported Clang binary operator $opcode")),
           operands.map(expression)
         )
+      case "UnaryOperator" if original("opcode").str == "__extension__" =>
+        require(operands.size == 1, "Clang GNU extension marker requires one operand")
+        val result = expression(operands.head)
+        tag(result, "clang.extensionMarker", text(original))
+        result
       case "UnaryOperator" =>
         require(operands.size == 1, "Clang unary expression requires one operand")
         val opcode   = original("opcode").str

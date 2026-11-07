@@ -47,6 +47,13 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
     } finally graph.close()
   }
   "Native Clang CPG" should {
+    "retain the value and source marker of GNU extension expressions" in {
+      withGraph("int f(int x) {return __extension__ (x + 1);}") { (graph, _) =>
+        graph.call.nameExact("<operator>.addition").size shouldBe 1
+        graph.tag.nameExact("clang.extensionMarker").value.toList shouldBe List("__extension__ (x + 1)")
+      }
+    }
+
     "type compiler-generated omitted record initializers" in {
       withGraph("struct Pair {int x;int y;}; struct Pair p={1}; int read(void) {return p.y;}") { (graph, _) =>
         val omitted = graph.call.nameExact("<operator>.implicitValueInit").toList
