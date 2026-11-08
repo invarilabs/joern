@@ -642,8 +642,10 @@ public:
         Units.push_back(static_cast<int64_t>(Literal->getCodeUnit(Index)));
       Entry["string_literal"] = llvm::json::Object{{"unit_width", Literal->getCharByteWidth()}, {"units", std::move(Units)}};
     }
-    if (auto Trait = dyn_cast<UnaryExprOrTypeTraitExpr>(Statement))
+    if (auto Trait = dyn_cast<UnaryExprOrTypeTraitExpr>(Statement)) {
+      Entry["operand_semantic_type"] = semanticType(Trait->getTypeOfArgument(), Context);
       if (Trait->isArgumentType()) Entry["operand_type"] = typeName(Trait->getArgumentType(), Context);
+    }
     Output.Nodes[identity(Statement)] = std::move(Entry); return true;
   }
 };

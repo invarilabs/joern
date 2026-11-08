@@ -444,6 +444,9 @@ class ClangBackendTests extends AnyWordSpec with Matchers {
       ) { (graph, _) =>
         graph.method.nameExact("read").methodReturn.typeFullName.l shouldBe List("Node *")
         graph.call.nameExact("<operator>.sizeOf").argument.isTypeRef.code.l shouldBe List("Node")
+        val operandTypes = graph.tag.nameExact("clang.operandType").value.l
+        operandTypes.size shouldBe 1
+        operandTypes.head should include ("c:@S@Node")
       }
     }
     "retain compiler source type spelling separately from canonical record identity" in {

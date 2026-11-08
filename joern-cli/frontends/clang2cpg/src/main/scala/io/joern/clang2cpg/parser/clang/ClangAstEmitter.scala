@@ -139,6 +139,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
   private def semanticAnnotations(node: NewNode, original: NativeValue): Unit = {
     info(original).obj.get("type").filter(_.str.nonEmpty).foreach(_ => tag(node, "clang.sourceTypeSpelling", sourceValueType(original)))
     info(original).obj.get("semantic_type").foreach(value => tag(node, "clang.semanticType", NativeValue.write(value)))
+    info(original).obj.get("operand_semantic_type").foreach(value => tag(node, "clang.operandType", NativeValue.write(value)))
     info(original).obj.get("usr").foreach(value => tag(node, "clang.declarationIdentity", value.str))
     info(original).obj.get("constant_value").foreach(value => tag(node, "clang.constantValue", value.str))
     info(original).obj.get("string_literal").foreach(value => tag(node, "clang.stringLiteral", NativeValue.write(value)))

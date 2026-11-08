@@ -192,6 +192,7 @@
     if (const auto *Label = dyn_cast<LabelStmt>(Statement)) { Java.text(Result, "declId", identifier(Label->getDecl())); Java.text(Result, "name", Label->getName()); }
     if (const auto *Trait = dyn_cast<UnaryExprOrTypeTraitExpr>(Statement)) {
       Java.text(Result, "name", getTraitSpelling(Trait->getKind()));
+      Java.put(Info, "operand_semantic_type", semantic(Trait->getTypeOfArgument()));
       if (Trait->isArgumentType()) { jobject Type = Java.object(); Java.text(Type, "qualType", Trait->getArgumentType().getAsString(Context.getPrintingPolicy())); Java.put(Result, "argType", Type); Java.text(Info, "operand_type", typeName(Trait->getArgumentType())); }
     }
     if (const auto *Constant = dyn_cast<ConstantExpr>(Statement)) {

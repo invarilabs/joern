@@ -12,7 +12,7 @@ class NativeCpgTests extends AnyWordSpec with Matchers {
     "build typed source expressions without AST dumps, evidence directories, or CDT" in {
       val directory = Files.createTempDirectory(Paths.get(sys.env("CLANG_CPG_TEST_ROOT")), "jni-cpg-")
       val source = directory.resolve("sample.c")
-      Files.writeString(source, "int increment(int value) {return value+1;}\n")
+      Files.writeString(source, "typedef struct Header {int count;} Alias; int increment(int value) {return value+1;} unsigned long width(void){return sizeof(Alias); }\n")
       val command = Seq(sys.env("CLANG_CPG_COMPILER"), "-std=gnu11", source.toString)
       val timings = mutable.ArrayBuffer.empty[NativeCpg.Timing]
       val graph = NativeCpg.create(Seq(ClangInput(source, command, directory)), directory,
@@ -26,6 +26,9 @@ class NativeCpgTests extends AnyWordSpec with Matchers {
         additions.head.typeFullName shouldBe "int"
         method.ast.isIdentifier.nameExact("value").typeFullName.toList shouldBe List("int")
         graph.tag.nameExact("clang.nativeEvidence").size shouldBe 0
+        val operandTypes = graph.tag.nameExact("clang.operandType").value.toList
+        operandTypes.size shouldBe 1
+        operandTypes.head should include ("c:@S@Header")
         val contract = ujson.read(graph.tag.nameExact("clang.translationUnit").value.head)
         contract("tools").obj should contain key source.toString
         timings.size shouldBe 1
