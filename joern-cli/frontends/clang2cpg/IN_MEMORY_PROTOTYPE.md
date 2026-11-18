@@ -166,3 +166,23 @@ heap, runtime version, and default overlays) completed in 487.06 seconds with an
 single paired comparison. Stock emitted four existing CFG order-fallback warnings;
 the native run emitted none. These timings do not represent the earlier plain
 directory command without the release compilation database.
+
+### Explicit included implementations
+
+`NativeCpg.create` accepts `includedDefinitions: Map[Path, Seq[IncludedDefinition]]`.
+Each key is one selected translation-unit source; each value pins a canonical
+included file and its SHA256. Clang captures the selected files' definitions and
+required declaration closure, retaining physical source locations and TU ownership.
+Unselected headers retain the existing external-contract boundary. A stale,
+duplicate, foreign, or unconsumed selection is an error.
+
+The existing NativeBenchmark harness accepts an optional sixth argument pointing
+to a JSON object from canonical TU paths to arrays of `{source, source_sha256}`.
+This is configuration, not a serialized AST. Capture and graph construction stay
+in memory. Consumers independently select included entry points by compiler USR,
+physical declaration source, and pinned input hash.
+
+The JNI entrypoint is `parseIncluded0`; the replacement JAR and JNI library must
+be built and packaged together. Older libraries cannot silently ignore the
+included-file argument. The Java boundary also checks that native capture
+acknowledges the exact requested source inventory.

@@ -47,6 +47,20 @@ class NativeParityTests extends AnyWordSpec with Matchers {
   }
 
   "Direct native C feature parity" should {
+    "distinguish macro wrappers from their expanded atomic operation" in {
+      withGraph("#define FETCH(p,v) __atomic_fetch_add(p,v,__ATOMIC_SEQ_CST)\nint increment(int *value){return FETCH(value,1);}") { graph =>
+        val wrapper = graph.call.nameExact("FETCH").head
+        wrapper.dispatchType shouldBe "INLINED"
+        tag(wrapper, "clang.kind") shouldBe "MacroExpansion"
+        wrapper._taggedByOut.collect { case value: Tag if value.name == "clang.atomic" => value }.size shouldBe 0
+        val intrinsic = wrapper.ast.isCall.nameExact("__atomic_fetch_add").head
+        tag(intrinsic, "clang.kind") shouldBe "AtomicExpr"
+        val facts = ujson.read(tag(intrinsic, "clang.atomic"))
+        facts("operands").arr.map(_("role").str).toSeq shouldBe Seq("pointer", "value", "order")
+        intrinsic.argument.size shouldBe 3
+      }
+    }
+
     "preserve command-line macro provenance without treating a compiler buffer as a disk file" in {
       val (directory, source) = setup("int read(void){return COMMAND_VALUE;}")
       val input = ClangInput(source, Seq(sys.env("CLANG_CPG_COMPILER"), "-std=gnu11", "-DCOMMAND_VALUE=7", source.toString), directory)

@@ -245,6 +245,8 @@
     } else if (const auto *Initializer = dyn_cast<InitListExpr>(Statement)) {
       const InitListExpr *Semantic = Initializer->isSemanticForm() ? Initializer : Initializer->getSemanticForm();
       if (!Semantic) fail("initializer lacks its compiler semantic form");
+      if (Semantic->getType()->isUnionType()) if (const FieldDecl *Field = Semantic->getInitializedFieldInUnion())
+        Java.text(Info, "initialized_union_field", unionFieldIdentity(Field));
       if (const Expr *Filler = Semantic->getArrayFiller()) {
         jobject Values = Java.list(); Java.add(Values, statement(Filler));
         for (const Expr *Element : Semantic->inits()) {

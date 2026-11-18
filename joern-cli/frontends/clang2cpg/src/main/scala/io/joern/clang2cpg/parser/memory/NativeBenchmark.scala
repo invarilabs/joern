@@ -9,13 +9,22 @@ import scala.collection.mutable
 /** Explicit prototype harness; all selected files share one CPG, native library and JVM. */
 object NativeBenchmark {
   def main(arguments: Array[String]): Unit = {
-    require(arguments.length == 5, "Expected source-root compilation-database output-directory JNI-library repository|single")
+    require(arguments.length == 5 || arguments.length == 6, "Expected source-root compilation-database output-directory JNI-library repository|single [included-definition-selection.json]")
     val root = Path.of(arguments(0)).toRealPath()
     val output = Path.of(arguments(2)).toAbsolutePath.normalize()
     require(!Files.exists(output), "Benchmark output already exists: " + output)
     Files.createDirectories(output)
     val config = Config(compilationDatabaseFilename = Some(arguments(1))).withInputPath(root.toString)
     val inputs = ClangInputs.plan(config)
+    val includedDefinitions = if (arguments.length == 6) {
+      val configured = ujson.read(Files.readString(Path.of(arguments(5))))
+      configured.obj.toSeq.map { case (owner, selected) =>
+        Path.of(owner) -> selected.arr.toSeq.map { entry =>
+          require(entry.obj.keySet == Set("source", "source_sha256"), "Invalid included-definition selection")
+          NativeCpg.IncludedDefinition(Path.of(entry("source").str), entry("source_sha256").str)
+        }
+      }.toMap
+    } else Map.empty[Path, Seq[NativeCpg.IncludedDefinition]]
     val repository = arguments(4) match {
       case "repository" => true
       case "single" => require(inputs.size == 1, "Single-file benchmark requires exactly one source"); false
@@ -38,7 +47,7 @@ object NativeBenchmark {
     }
     val started = System.nanoTime()
     try {
-      val graph = NativeCpg.create(inputs, graphRoot, output.resolve("source.cpg.bin"), Path.of(arguments(3)), timings, repository, workers = Runtime.getRuntime.availableProcessors()).get
+      val graph = NativeCpg.create(inputs, graphRoot, output.resolve("source.cpg.bin"), Path.of(arguments(3)), timings, repository, workers = Runtime.getRuntime.availableProcessors(), includedDefinitions = includedDefinitions).get
       try X2Cpg.applyDefaultOverlays(graph) finally graph.close()
       val report = ujson.Obj("status" -> "graph_ready", "source_count" -> inputs.size,
         "graph_seconds" -> ((System.nanoTime() - started).toDouble / 1e9),

@@ -4,17 +4,22 @@ import java.nio.file.{Files, Path}
 
 /** Explicit in-process Clang entrypoint. Loading or compiler errors propagate; no alternate parser is used. */
 final class ClangNative private () {
-  @native private def parse0(command: Array[String], cwd: String): java.util.Map[String, Object]
+  @native private def parseIncluded0(command: Array[String], cwd: String, includedSources: Array[String]): java.util.Map[String, Object]
 
-  def parse(command: Seq[String], cwd: Path): NativeValue = {
+  def parse(command: Seq[String], cwd: Path, includedSources: Seq[Path] = Seq.empty): NativeValue = {
     require(command != null && command.size >= 2, "Native Clang requires a compiler command and source input")
     require(command.forall(value => value != null && value.nonEmpty), "Native Clang command has an empty argument")
     require(cwd != null && cwd.isAbsolute && Files.isDirectory(cwd),
       "Native Clang requires an existing absolute working directory")
-    val document = NativeValue.fromJava(parse0(command.toArray, cwd.toRealPath().toString))
+    require(includedSources.distinct.size == includedSources.size, "Duplicate included definition source")
+    includedSources.foreach(path => require(path.isAbsolute && Files.isRegularFile(path) && path.toRealPath() == path,
+      "Included definition source must be canonical and existing: " + path))
+    val document = NativeValue.fromJava(parseIncluded0(command.toArray, cwd.toRealPath().toString, includedSources.map(_.toString).toArray))
     require(document.objOpt.nonEmpty, "Native Clang returned a non-object translation unit")
     require(document("schema_version").num == 1, "Native Clang returned an unsupported schema")
     require(document("direct_cpg_only").bool, "Native Clang did not return direct CPG facts")
+    val captured = document.obj.get("included_definition_sources").toSeq.flatMap(_.arr.map(_.str)).sorted
+    require(captured == includedSources.map(_.toString).sorted, "Native Clang did not acknowledge the exact included-definition selection")
     require(document("ast")("kind").str == "TranslationUnitDecl", "Native Clang returned an incomplete translation unit")
     require(document("nodes").obj.nonEmpty, "Native Clang returned no compiler node facts")
     require(document("inputs").obj.nonEmpty, "Native Clang returned no source/header closure")

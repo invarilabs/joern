@@ -97,8 +97,13 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
   }
   private def canonical(node: NativeValue): String      = info(node)("canonical").str
   private def source(node: NativeValue): Option[String] = info(node).obj.get("file").map(_.str).filter(_.nonEmpty)
-  private def inMain(node: NativeValue): Boolean        =
-    source(node).exists(name => Paths.get(name).toAbsolutePath.normalize() == evidence.source)
+  private val includedDefinitionSources = document.obj.get("included_definition_sources").toSeq
+    .flatMap(_.arr.map(value => Paths.get(value.str))).toSet
+  private def inSelectedSource(node: NativeValue): Boolean =
+    source(node).exists(name => {
+      val path = Paths.get(name).toAbsolutePath.normalize()
+      path == evidence.source || includedDefinitionSources(path)
+    })
   private def graphFilename(name: String): String = {
     val path = Paths.get(name).toAbsolutePath.normalize()
     if (path.startsWith(root)) root.relativize(path).toString
@@ -146,10 +151,14 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
     info(original).obj.get("direct_callee_usr").foreach(value => tag(node, "clang.directCalleeIdentity", value.str))
     info(original).obj.get("storage_duration").foreach(value => tag(node, "clang.storageDuration", value.str))
     info(original).obj.get("initializer_kind").foreach(value => tag(node, "clang.initializerKind", value.str))
+    info(original).obj.get("original_semantic_type").foreach(value => tag(node, "clang.originalSemanticType", NativeValue.write(value)))
+    info(original).obj.get("evaluated_bounds").foreach(value => tag(node, "clang.evaluatedArrayBounds", value.arr.size.toString))
+    info(original).obj.get("initialized_union_field").foreach(value => tag(node, "clang.initializedUnionField", value.str))
+    info(original).obj.get("zero_initialized_union_field").foreach(value => tag(node, "clang.zeroInitializedUnionField", value.str))
   }
-  private def annotate(node: AstNodeNew, original: NativeValue): Unit = {
+  private def annotate(node: AstNodeNew, original: NativeValue, nodeKind: Option[String] = None): Unit = {
     position(node, original)
-    tag(node, "clang.kind", kind(original))
+    tag(node, "clang.kind", nodeKind.getOrElse(kind(original)))
     semanticAnnotations(node, original)
     info(original).obj.get("type").foreach(value => tag(node, "clang.canonicalType", value.str))
     original.obj.get("value").foreach(value => tag(node, "clang.value", value.strOpt.getOrElse(NativeValue.write(value))))
@@ -211,7 +220,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         .fullName(scoped(fullName))
         .filename(filename(selected))
         .code(text(selected))
-        .isExternal(!inMain(selected))
+        .isExternal(!inSelectedSource(selected))
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
         .astParentFullName(scoped(filename(selected) + ":<global>"))
       annotate(declaration, selected)
@@ -241,7 +250,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         .filename(filename(node))
         .code(text(node))
         .aliasTypeFullName(valueType(node))
-        .isExternal(!inMain(node))
+        .isExternal(!inSelectedSource(node))
         .astParentType(NodeTypes.NAMESPACE_BLOCK)
         .astParentFullName(scoped(filename(node) + ":<global>"))
       annotate(alias, node)
@@ -277,7 +286,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
     }
     val ordered = groups.toSeq.zipWithIndex
       .sortBy { case ((_, alternatives), index) =>
-        val definitions = alternatives.filter(node => inMain(node) && children(node).exists(kind(_) == "CompoundStmt"))
+        val definitions = alternatives.filter(node => inSelectedSource(node) && children(node).exists(kind(_) == "CompoundStmt"))
         (
           if (definitions.nonEmpty) 0 else 1,
           definitions.headOption.map(node => info(node)("offset").num.toLong).getOrElse(index.toLong)
@@ -285,7 +294,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       }
       .map(_._1)
     ordered.map { case (root, alternatives) =>
-      val definitions = alternatives.filter(node => inMain(node) && children(node).exists(kind(_) == "CompoundStmt"))
+      val definitions = alternatives.filter(node => inSelectedSource(node) && children(node).exists(kind(_) == "CompoundStmt"))
       require(definitions.size <= 1, s"Multiple selected Clang function definitions for $root")
       val node = definitions.headOption.getOrElse(
         alternatives
@@ -331,7 +340,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       // preserving c2cpg's source-method allocation convention.
       if (
         definitions.nonEmpty && declarations.values.exists(declaration =>
-          kind(declaration) == "VarDecl" && inMain(declaration) && info(declaration)("file_scope").bool
+          kind(declaration) == "VarDecl" && inSelectedSource(declaration) && info(declaration)("file_scope").bool
         )
       ) globalScope()
       alternatives.foreach { alternative =>
@@ -496,7 +505,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         .code(invocation("code").str)
         .typeFullName(valueType(original))
         .dispatchType(DispatchTypes.INLINED)
-      annotate(wrapper, original)
+      annotate(wrapper, original, Some("MacroExpansion"))
       tag(wrapper, "clang.macroInvocation", NativeValue.write(invocation))
       add(wrapper)
       val block = NewBlock().code("<empty>").typeFullName(valueType(original))
@@ -771,31 +780,43 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
     // nested value expansions retain their own expression provenance instead.
     if (expansions.size == 1 && expansions.head("offset").num.toInt == begin) {
       val expansion = expansions.head
-      tag(
-        local,
-        "clang.declarationMacro",
-        NativeValue.write(
-          NObj(
-            "kind"        -> "VarDecl",
-            "name"        -> expansion("name"),
-            "begin"       -> begin,
-            "end"         -> end,
-            "source"      -> text(original),
-            "declaration" -> declarationUsr(original)
-          )
-        )
-      )
+      val provenance = NObj(
+        "kind" -> "VarDecl", "name" -> expansion("name"), "begin" -> begin, "end" -> end,
+        "source" -> text(original), "declaration" -> declarationUsr(original))
+      if (source(original).exists(name => Paths.get(name).toAbsolutePath.normalize() != evidence.source))
+        provenance.obj("file") = expansion("file")
+      tag(local, "clang.declarationMacro", NativeValue.write(provenance))
     }
+  }
+  private def evaluatedBounds(original: NativeValue): Seq[AstNodeNew] = info(original).obj.get("evaluated_bounds").toSeq.flatMap { values =>
+    val owner = info(original)("usr").str
+    require(owner.nonEmpty, "Evaluated array bounds require compiler declaration identity")
+    values.arr.zipWithIndex.map { case (bound, dimension) =>
+      require(bound("dimension").num.toInt == dimension, "Evaluated array bounds require contiguous compiler dimension order")
+      val result = expression(bound("expression"))
+      tag(result, "clang.arrayBound", NativeValue.write(NObj("declaration" -> owner, "dimension" -> dimension)))
+      result
+    }
+  }
+  private def compound(original: NativeValue, prelude: Seq[AstNodeNew]): NewBlock = {
+    val block = NewBlock().code(text(original)).typeFullName("void")
+    annotate(block, original); add(block)
+    (prelude ++ children(original).flatMap(statements)).zipWithIndex.foreach { case (child, index) => ast(block, child, index + 1) }
+    block
+  }
+  // A compiler NullStmt is an explicit body, not a missing/unsupported body.
+  // Standalone NullStmt keeps its existing lack of executable operations.
+  private def controlBody(original: NativeValue): Seq[AstNodeNew] = {
+    if (kind(original) == "NullStmt") {
+      val block = NewBlock().code(text(original)).typeFullName("void")
+      annotate(block, original); add(block)
+      Seq(block)
+    } else statements(original)
   }
   private def statements(original: NativeValue): Seq[AstNodeNew] = {
     val operands = children(original)
     kind(original) match {
-      case "CompoundStmt" =>
-        val block = NewBlock().code(text(original)).typeFullName("void")
-        annotate(block, original)
-        add(block)
-        operands.flatMap(statements).zipWithIndex.foreach { case (child, index) => ast(block, child, index + 1) }
-        Seq(block)
+      case "CompoundStmt" => Seq(compound(original, Seq.empty))
       case "DeclStmt" => operands.flatMap(statements)
       case "VarDecl"  =>
         val local = NewLocal().name(declarationName(original)).code(text(original)).typeFullName(valueType(original))
@@ -816,7 +837,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
           assignment.code = text(original)
           assignment
         }
-        Seq(local) ++ assignments
+        Seq(local) ++ evaluatedBounds(original) ++ assignments
       case "ReturnStmt" =>
         require(operands.size <= 1, "Clang return has multiple values")
         val result = NewReturn().code(text(original))
@@ -843,11 +864,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         }
         operands.zipWithIndex.foreach { case (child, index) =>
           if (kind(child).nonEmpty) {
-            val roots = statements(child)
-            roots.zipWithIndex.foreach { case (root, nestedIndex) =>
-              ast(control, root, index + 1 + nestedIndex)
-              if (index == conditionIndex) builder.addEdge(control, root, EdgeTypes.CONDITION)
-              val role = (kind(original), index) match {
+            val role = (kind(original), index) match {
                 case ("IfStmt", 1) | ("WhileStmt", 1) | ("SwitchStmt", 1) => Some(EdgeTypes.TRUE_BODY)
                 case ("IfStmt", 2)                    => Some(EdgeTypes.FALSE_BODY)
                 case ("DoStmt", 0)                    => Some(EdgeTypes.DO_BODY)
@@ -856,6 +873,11 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
                 case ("ForStmt", 4)                   => Some(EdgeTypes.FOR_BODY)
                 case _                                => None
               }
+            val body = role.exists(label => Set(EdgeTypes.TRUE_BODY, EdgeTypes.FALSE_BODY, EdgeTypes.DO_BODY, EdgeTypes.FOR_BODY)(label))
+            val roots = if (body) controlBody(child) else statements(child)
+            roots.zipWithIndex.foreach { case (root, nestedIndex) =>
+              ast(control, root, index + 1 + nestedIndex)
+              if (index == conditionIndex) builder.addEdge(control, root, EdgeTypes.CONDITION)
               role.filterNot(label => label == EdgeTypes.FOR_INIT && root.isInstanceOf[NewLocal])
                 .foreach(label => builder.addEdge(control, root, label))
             }
@@ -923,6 +945,12 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         Seq(label) ++ operands.flatMap(statements)
       case "NullStmt"                                => Seq.empty // An empty C statement has no executable operation.
       case "StaticAssertDecl" => Seq.empty // Compiler-checked declaration, recorded separately.
+      case "TypedefDecl" if info(original).obj.contains("evaluated_bounds") =>
+        val block = NewBlock().code(text(original)).typeFullName("void")
+        annotate(block, original); add(block)
+        tag(block, "clang.arrayBoundDeclaration", info(original)("usr").str)
+        evaluatedBounds(original).zipWithIndex.foreach { case (bound,index) => ast(block,bound,index+1) }
+        Seq(block)
       case "TypedefDecl" | "RecordDecl" | "CXXRecordDecl" | "EnumDecl" | "AccessSpecDecl" => Seq.empty // Already registered as non-executable declarations.
       case _ if metadata.get(identity(original)).exists(_.obj.contains("type")) => Seq(expression(original))
       case other => throw new IllegalArgumentException(s"Unsupported Clang statement $other: ${text(original)}")
@@ -934,7 +962,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       "Direct semantic CPG requires an explicitly selected native direct capture")
     index(document("ast"))
     declarations.values.foreach(info)
-    declarations.values.filter(inMain).find(node =>
+    declarations.values.filter(inSelectedSource).find(node =>
       ((kind(node).startsWith("CXX") && !Set("CXXRecordDecl", "CXXMethodDecl")(kind(node))) ||
         Set("ClassTemplateDecl", "FunctionTemplateDecl", "ClassTemplateSpecializationDecl")(kind(node))) &&
         !node.obj.get("isImplicit").exists(_.bool)
@@ -942,7 +970,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       throw new IllegalArgumentException(s"Unsupported Clang declaration ${kind(node)}: ${text(node)}; native C++ graph support is required")
     }
     namespace(graphFilename(evidence.source.toString))
-    declarations.values.filter(node => kind(node) == "StaticAssertDecl" && inMain(node)).foreach { original =>
+    declarations.values.filter(node => kind(node) == "StaticAssertDecl" && inSelectedSource(node)).foreach { original =>
       val failed = info(original)("assertion_failed").bool
       val dependent = info(original)("assertion_dependent").bool
       require(!failed && !dependent, "Clang static assertion is failed or dependent; a concrete successful assertion is required")
@@ -964,7 +992,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
     declarations.values
       .filter(node => kind(node) == "VarDecl" && source(node).nonEmpty && info(node)("file_scope").bool)
       .foreach { node =>
-        if (!localDeclarations(identity(node)) && !inMain(node)) {
+        if (!localDeclarations(identity(node)) && !inSelectedSource(node)) {
           val member = NewMember().name(declarationName(node)).code(text(node)).typeFullName(valueType(node))
           annotate(member, node)
           ast(namespace(filename(node)), member, 1)
@@ -972,7 +1000,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         }
       }
     val globalInitializers = declarations.values
-      .filter(node => kind(node) == "VarDecl" && inMain(node) && info(node)("file_scope").bool)
+      .filter(node => kind(node) == "VarDecl" && inSelectedSource(node) && info(node)("file_scope").bool)
       .toSeq
     if (globalInitializers.nonEmpty) {
       val (_, block) = globalScope()
@@ -1011,7 +1039,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         val body = {
           require(activeThis.isEmpty, "nested active C++ method receiver")
           activeThis = thisParameters.get(method)
-          try statements(bodies.head).head.asInstanceOf[NewBlock]
+          try compound(bodies.head, children(original).filter(kind(_) == "ParmVarDecl").flatMap(evaluatedBounds))
           finally activeThis = None
         }
         ast(method, body, children(original).count(kind(_) == "ParmVarDecl") + 1)

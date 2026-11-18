@@ -12,12 +12,23 @@ import scala.util.Try
 
 /** Experimental explicit JNI entrypoint; no alternate parser or disk evidence path. */
 object NativeCpg {
+  final case class IncludedDefinition(source: Path, sha256: String)
   final case class Timing(source: String, nativeSeconds: Double, graphSeconds: Double)
   def create(inputs: Seq[ClangInput], root: Path, output: Path, library: Path,
-    timings: mutable.Buffer[Timing], repository: Boolean, workers: Int = 1): Try[Cpg] = {
+    timings: mutable.Buffer[Timing], repository: Boolean, workers: Int = 1, includedDefinitions: Map[Path, Seq[IncludedDefinition]] = Map.empty): Try[Cpg] = {
     require(workers > 0, "Native capture worker count must be positive")
     require(inputs.nonEmpty, "Native CPG requires explicitly selected translation units")
     require(inputs.map(_.source).distinct.size == inputs.size, "Duplicate native translation unit")
+    require(includedDefinitions.keySet.subsetOf(inputs.map(_.source).toSet), "Included definition owner is outside selected translation units")
+    includedDefinitions.foreach { case (_, selections) =>
+      require(selections.nonEmpty && selections.map(_.source).distinct.size == selections.size, "Empty or duplicate included definition selection")
+      selections.foreach { selected =>
+        require(selected.source.isAbsolute && Files.isRegularFile(selected.source) && selected.source.toRealPath() == selected.source,
+          "Included definition source must be canonical and existing: " + selected.source)
+        require(selected.sha256.matches("[0-9a-f]{64}") && NativeGraphEvidence.digest(selected.source) == selected.sha256,
+          "Included definition source hash is stale: " + selected.source)
+      }
+    }
     val native = ClangNative.load(library)
     val config = Config().withInputPath(root.toString).withOutputPath(output.toString)
     withNewEmptyCpg(output.toString, config) { (graph, _) =>
@@ -29,7 +40,12 @@ object NativeCpg {
       val closure = mutable.LinkedHashMap.empty[String, String]
       ClangCaptures.foreach(inputs, workers) { input =>
         val started = System.nanoTime()
-        val document = native.parse(input.command, input.directory)
+        val selected = includedDefinitions.getOrElse(input.source, Seq.empty)
+        val document = native.parse(input.command, input.directory, selected.map(_.source))
+        selected.foreach { entry =>
+          require(document("inputs").obj.get(entry.source.toString).exists(_.str == entry.sha256),
+            "Included definition source is absent or stale in compiler input closure: " + entry.source)
+        }
         document -> ((System.nanoTime() - started).toDouble / 1e9)
       } { case (input, (document, nativeSeconds)) =>
         val paths = Seq(library.toAbsolutePath.normalize(), Path.of(input.command.head), input.source)

@@ -2,13 +2,17 @@
 class ClangDeclarationClosure : public RecursiveASTVisitor<ClangDeclarationClosure> {
   ASTContext &Context;
   SourceManager &Manager;
+  const std::set<std::string> IncludedSources;
   std::set<const Decl *> Required;
   std::set<const void *> Types;
   std::vector<const Decl *> Pending;
 
   bool main(const Decl *Declaration) const {
-    return Declaration->getLocation().isValid() &&
-      Manager.isWrittenInMainFile(Manager.getExpansionLoc(Declaration->getLocation()));
+    const SourceLocation Location = Manager.getExpansionLoc(Declaration->getLocation());
+    if (Location.isInvalid()) return false;
+    if (Manager.isWrittenInMainFile(Location)) return true;
+    const FileEntry *File = Manager.getFileEntryForID(Manager.getFileID(Location));
+    return File && IncludedSources.count(File->tryGetRealPathName().str()) != 0;
   }
   void mark(const Decl *Declaration) {
     if (!Declaration || !Required.insert(Declaration).second) return;
@@ -42,7 +46,19 @@ class ClangDeclarationClosure : public RecursiveASTVisitor<ClangDeclarationClosu
     else if (const auto *Vector = dyn_cast<VectorType>(Shape)) type(Vector->getElementType());
   }
 public:
-  explicit ClangDeclarationClosure(ASTContext &Value) : Context(Value), Manager(Value.getSourceManager()) {
+  explicit ClangDeclarationClosure(ASTContext &Value, const std::set<std::string> &Selected = {})
+      : Context(Value), Manager(Value.getSourceManager()), IncludedSources(Selected) {
+    std::set<std::string> Found;
+    for (const Decl *Declaration : Context.getTranslationUnitDecl()->decls()) {
+      const auto *Function = dyn_cast<FunctionDecl>(Declaration);
+      if (Function && Function->doesThisDeclarationHaveABody() && main(Function)) {
+        const SourceLocation Location = Manager.getExpansionLoc(Function->getLocation());
+        const FileEntry *File = Manager.getFileEntryForID(Manager.getFileID(Location));
+        if (File) Found.insert(File->tryGetRealPathName().str());
+      }
+    }
+    for (const auto &Source : IncludedSources)
+      if (!Found.count(Source)) fail("included definition source has no parsed function definition: " + Source);
     for (const Decl *Declaration : Context.getTranslationUnitDecl()->decls())
       if (main(Declaration)) mark(Declaration);
     for (size_t Index = 0; Index < Pending.size(); ++Index) {
@@ -62,7 +78,7 @@ public:
       }
       if (const auto *Function = dyn_cast<FunctionDecl>(Declaration))
         for (const ParmVarDecl *Parameter : Function->parameters()) mark(Parameter);
-      // Header function bodies remain external contracts, as in the existing source graph.
+      // Unselected header bodies remain coarse external contracts.
       if (main(Declaration)) TraverseDecl(const_cast<Decl *>(Declaration));
     }
   }

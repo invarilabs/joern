@@ -40,8 +40,26 @@ std::string identifier(const void *Pointer) {
 }
 std::string declarationUsr(const NamedDecl *Declaration) {
   llvm::SmallString<128> Buffer;
-  if (index::generateUSRForDecl(Declaration->getCanonicalDecl(), Buffer)) fail("declaration lacks a compiler USR");
+  if (index::generateUSRForDecl(Declaration->getCanonicalDecl(), Buffer)) {
+    const SourceManager &Manager = Declaration->getASTContext().getSourceManager();
+    fail("declaration lacks a compiler USR: kind=" + std::string(Declaration->getDeclKindName()) +
+      " name=" + Declaration->getNameAsString() + " at " + Declaration->getLocation().printToString(Manager));
+  }
   return Buffer.str().str();
+}
+// All union members use one declaration-bound identity scheme, including named
+// members. Anonymous carriers are real FieldDecls, not failed-USR substitutes.
+std::string unionFieldIdentity(const FieldDecl *Field) {
+  if (!Field || !Field->getParent()->isUnion()) fail("union member identity requires a compiler union FieldDecl");
+  const RecordDecl *Owner = Field->getParent()->getDefinition();
+  if (!Owner) fail("union member identity requires a complete compiler record declaration");
+  unsigned Ordinal = 0, Selected = 0, Matches = 0;
+  for (const FieldDecl *Candidate : Owner->fields()) {
+    if (Candidate->getCanonicalDecl() == Field->getCanonicalDecl()) { Selected = Ordinal; ++Matches; }
+    ++Ordinal;
+  }
+  if (Matches != 1) fail("union member lacks unique canonical declaration ownership");
+  return declarationUsr(Owner) + "#field:" + std::to_string(Selected);
 }
 struct LocalFrame {
   JNIEnv *Env;
@@ -97,6 +115,7 @@ class CompilerMaps {
   JavaValues &Java;
   ASTContext &Context;
   SourceManager &Manager;
+  const std::set<std::string> &IncludedSources;
   std::map<const EnumDecl *, std::string> EnumIdentities;
   std::set<const Decl *> ActiveDeclarations;
   std::set<const Decl *> WrittenDeclarations;
@@ -111,7 +130,7 @@ public:
       return true;
     }
   };
-  CompilerMaps(JavaValues &Values, ASTContext &Value, jobject Metadata) : Java(Values), Context(Value), Manager(Context.getSourceManager()), Nodes(Metadata) {
+  CompilerMaps(JavaValues &Values, ASTContext &Value, jobject Metadata, const std::set<std::string> &Selected) : Java(Values), Context(Value), Manager(Context.getSourceManager()), IncludedSources(Selected), Nodes(Metadata) {
     EnumInventory Inventory; Inventory.TraverseDecl(Context.getTranslationUnitDecl());
     std::map<std::string, std::vector<const EnumDecl *>> Groups;
     for (const auto *Declaration : Inventory.Ordered) Groups[declarationUsr(Declaration)].push_back(Declaration);
@@ -119,7 +138,13 @@ public:
       for (size_t Index = 0; Index < Group.second.size(); ++Index)
         EnumIdentities[Group.second[Index]] = Group.first + (Group.second.size() == 1 ? "" : "#enum:" + std::to_string(Index));
   }
-  bool main(SourceLocation Location) const { return Location.isValid() && Manager.isWrittenInMainFile(Manager.getExpansionLoc(Location)); }
+  bool main(SourceLocation Location) const {
+    Location = Manager.getExpansionLoc(Location);
+    if (Location.isInvalid()) return false;
+    if (Manager.isWrittenInMainFile(Location)) return true;
+    const FileEntry *File = Manager.getFileEntryForID(Manager.getFileID(Location));
+    return File && IncludedSources.count(File->tryGetRealPathName().str()) != 0;
+  }
   std::string enumIdentity(const EnumDecl *Declaration) const {
     auto Found = EnumIdentities.find(Declaration->getCanonicalDecl());
     if (Found == EnumIdentities.end()) fail("enum declaration lacks compiler inventory identity");
@@ -255,6 +280,31 @@ public:
     jobject Type = Java.object(); Java.text(Type, "qualType", Declaration->getType().getAsString(Context.getPrintingPolicy())); Java.put(Result, "type", Type);
     return Frame.keep(Result);
   }
+  void evaluatedBounds(jobject Info, const DeclaratorDecl *Declaration) {
+    QualType Original = Declaration->getType();
+    if (const auto *Parameter = dyn_cast<ParmVarDecl>(Declaration)) Original = Parameter->getOriginalType();
+    if (!Original->isVariablyModifiedType()) return;
+    jobject Bounds = Java.list(); unsigned Dimension = 0;
+    if (const auto *Parameter = dyn_cast<ParmVarDecl>(Declaration)) {
+      const auto *Function = dyn_cast<FunctionDecl>(Parameter->getDeclContext());
+      if (!Function || !Function->doesThisDeclarationHaveABody()) {
+        Java.put(Info, "evaluated_bounds", Bounds); return;
+      }
+    }
+    const TypeSourceInfo *Source = Declaration->getTypeSourceInfo();
+    if (!Source) fail("variable array declaration lacks compiler type source evidence");
+    {
+      for (TypeLoc Location = Source->getTypeLoc(); !Location.isNull(); Location = Location.getNextTypeLoc()) {
+        if (auto Array = Location.getAs<VariableArrayTypeLoc>()) {
+          const Expr *Size = Array.getSizeExpr();
+          if (!Size) fail("evaluated variable array lacks its written bound expression");
+          jobject Bound = Java.object(); Java.integer(Bound, "dimension", Dimension++);
+          Java.put(Bound, "expression", statement(Size)); Java.add(Bounds, Bound);
+        }
+      }
+    }
+    Java.put(Info, "evaluated_bounds", Bounds);
+  }
   jobject declaration(const Decl *Declaration) {
     LocalFrame Frame(Java.environment());
     if (!ActiveDeclarations.insert(Declaration).second) fail("recursive compiler declaration syntax");
@@ -269,13 +319,23 @@ public:
     if (const auto *Named = dyn_cast<NamedDecl>(Declaration)) { Java.text(Info, "name", Named->getNameAsString()); Java.text(Result, "name", Named->getNameAsString()); }
     if (Declaration->isImplicit()) Java.flag(Result, "isImplicit", true);
     if (const auto *Value = dyn_cast<ValueDecl>(Declaration)) sourceType(Result, Info, Value->getType());
+    if (const auto *Field = dyn_cast<FieldDecl>(Declaration)) if (Field->getParent()->isUnion())
+      Java.text(Info, "usr", unionFieldIdentity(Field));
     jobject Children = Java.list();
     if (const auto *Variable = dyn_cast<VarDecl>(Declaration)) {
       Java.flag(Info, "file_scope", Variable->isFileVarDecl()); Java.flag(Info, "has_initializer", Variable->hasInit());
       Java.text(Info, "storage_duration", Variable->getTLSKind() != VarDecl::TLS_None ? "thread" : Variable->hasGlobalStorage() ? "static" : "automatic");
       Java.text(Info, "initializer_kind", Variable->hasInit() ? "explicit" : Variable->hasGlobalStorage() && Variable->isThisDeclarationADefinition() != VarDecl::DeclarationOnly ? "implicit_zero" : Variable->isFileVarDecl() ? "external" : "uninitialized");
       if (!isa<ParmVarDecl>(Variable) && (Variable->isFileVarDecl() || main(Variable->getLocation()))) Java.text(Info, "usr", declarationUsr(Variable));
-      if (const auto *Parameter = dyn_cast<ParmVarDecl>(Variable)) Java.text(Info, "original_type", typeName(Parameter->getOriginalType()));
+      if (const auto *Parameter = dyn_cast<ParmVarDecl>(Variable)) {
+        Java.text(Info, "original_type", typeName(Parameter->getOriginalType()));
+        if (Parameter->getOriginalType()->isArrayType() || Parameter->getOriginalType()->isVariablyModifiedType())
+          Java.put(Info, "original_semantic_type", semantic(Parameter->getOriginalType()));
+        if (Parameter->getOriginalType()->isVariablyModifiedType()) {
+          Java.text(Info, "usr", declarationUsr(Parameter));
+          evaluatedBounds(Info, Parameter);
+        }
+      } else evaluatedBounds(Info, Variable);
       if (Variable->hasInit() && main(Variable->getLocation())) Java.add(Children, statement(Variable->getInit()));
     } else if (const auto *Function = dyn_cast<FunctionDecl>(Declaration)) {
       Java.text(Info, "usr", declarationUsr(Function)); Java.flag(Info, "externally_visible", Function->isExternallyVisible());
@@ -283,10 +343,29 @@ public:
       Java.flag(Info, "variadic", Function->isVariadic()); Java.flag(Info, "has_body", Function->doesThisDeclarationHaveABody());
       for (const ParmVarDecl *Parameter : Function->parameters()) Java.add(Children, declaration(Parameter));
       if (Function->doesThisDeclarationHaveABody() && main(Function->getLocation())) Java.add(Children, statement(Function->getBody()));
-    } else if (const auto *Alias = dyn_cast<TypedefNameDecl>(Declaration)) sourceType(Result, Info, Alias->getUnderlyingType());
+    } else if (const auto *Alias = dyn_cast<TypedefNameDecl>(Declaration)) {
+      sourceType(Result, Info, Alias->getUnderlyingType());
+      if (Alias->getUnderlyingType()->isVariablyModifiedType()) {
+        Java.text(Info, "usr", declarationUsr(Alias)); jobject Bounds = Java.list(); unsigned Dimension = 0;
+        if (!Alias->getTypeSourceInfo()) fail("variable array typedef lacks compiler type source evidence");
+        for (TypeLoc Location = Alias->getTypeSourceInfo()->getTypeLoc(); !Location.isNull(); Location = Location.getNextTypeLoc()) {
+          if (auto Array = Location.getAs<VariableArrayTypeLoc>()) {
+            if (!Array.getSizeExpr()) fail("variable array typedef lacks written bound");
+            jobject Bound = Java.object(); Java.integer(Bound, "dimension", Dimension++);
+            Java.put(Bound, "expression", statement(Array.getSizeExpr())); Java.add(Bounds, Bound);
+          }
+        }
+        Java.put(Info, "evaluated_bounds", Bounds);
+      }
+    }
     else if (const auto *Record = dyn_cast<RecordDecl>(Declaration)) {
       sourceType(Result, Info, Context.getRecordType(Record)); Java.flag(Result, "completeDefinition", Record->isCompleteDefinition());
       if (Record->getName().empty() && Record->getTypedefNameForAnonDecl()) Java.text(Info, "name", Record->getTypedefNameForAnonDecl()->getNameAsString());
+      if (Record->isUnion() && Record->isCompleteDefinition()) {
+        for (const FieldDecl *Field : Record->fields()) if (!Field->isUnnamedBitField()) {
+          Java.text(Info, "zero_initialized_union_field", unionFieldIdentity(Field)); break;
+        }
+      }
       for (const Decl *Child : Record->decls()) Java.add(Children, declaration(Child));
     } else if (const auto *Enum = dyn_cast<EnumDecl>(Declaration)) {
       sourceType(Result, Info, Context.getEnumType(Enum)); for (const auto *Enumerator : Enum->enumerators()) Java.add(Children, declaration(Enumerator));
@@ -308,7 +387,7 @@ public:
     LocalFrame Frame(Java.environment()); jobject Root = Java.object(), Children = Java.list();
     Java.text(Root, "id", identifier(Context.getTranslationUnitDecl())); Java.text(Root, "kind", "TranslationUnitDecl");
     Java.put(Nodes, identifier(Context.getTranslationUnitDecl()), Java.object());
-    ClangDeclarationClosure Required(Context);
+    ClangDeclarationClosure Required(Context, IncludedSources);
     for (const Decl *Declaration : Context.getTranslationUnitDecl()->decls())
       if (Required.contains(Declaration)) Java.add(Children, declaration(Declaration));
     for (const Decl *Declaration : Required.ordered()) {
@@ -336,6 +415,7 @@ public:
 };
 
 struct ParseState {
+  std::set<std::string> IncludedSources;
   JavaValues &Java; jobject Result = nullptr, Macros, Directives;
   explicit ParseState(JavaValues &Values) : Java(Values), Macros(Values.list()), Directives(Values.list()) {}
   ~ParseState() { if (Result) Java.environment()->DeleteGlobalRef(Result); }
@@ -378,7 +458,12 @@ public:
     Java.add(State.Macros, Entry);
   }
   void directive(const Token &Name, llvm::StringRef Kind) {
-    auto &Manager = Processor.getSourceManager(); if (!Name.getLocation().isValid() || !Manager.isWrittenInMainFile(Manager.getExpansionLoc(Name.getLocation()))) return;
+    auto &Manager = Processor.getSourceManager();
+    const SourceLocation Location = Manager.getExpansionLoc(Name.getLocation());
+    if (Location.isInvalid()) return;
+    const FileEntry *File = Manager.getFileEntryForID(Manager.getFileID(Location));
+    if (!Manager.isWrittenInMainFile(Location) &&
+        (!File || !State.IncludedSources.count(File->tryGetRealPathName().str()))) return;
     LocalFrame Frame(State.Java.environment()); jobject Entry = range(SourceRange(Name.getLocation()));
     State.Java.text(Entry, "kind", Kind); State.Java.text(Entry, "name", Processor.getSpelling(Name)); State.Java.add(State.Directives, Entry);
   }
@@ -392,7 +477,11 @@ public:
   void HandleTranslationUnit(ASTContext &Context) override {
     if (Context.getDiagnostics().hasErrorOccurred()) return;
     LocalFrame Frame(State.Java.environment()); auto &Java = State.Java; jobject Document = Java.object(), Nodes = Java.object();
-    CompilerMaps Maps(Java, Context, Nodes); jobject Ast = Maps.translationUnit();
+    CompilerMaps Maps(Java, Context, Nodes, State.IncludedSources); jobject Ast = Maps.translationUnit();
+    if (!State.IncludedSources.empty()) {
+      jobject Sources = Java.list(); for (const auto &Source : State.IncludedSources) Java.add(Sources, Java.string(Source));
+      Java.put(Document, "included_definition_sources", Sources);
+    }
     Java.integer(Document, "schema_version", 1); Java.flag(Document, "direct_cpg_only", true); Java.put(Document, "ast", Ast); Java.put(Document, "nodes", Nodes);
     Java.put(Document, "macros", Java.environment()->NewLocalRef(State.Macros)); Java.put(Document, "macro_directives", Java.environment()->NewLocalRef(State.Directives));
     Java.put(Document, "inputs", Maps.inputs());
@@ -427,12 +516,18 @@ std::string javaString(JNIEnv *Env, jstring Value) {
   Result.resize(Write - Start); return Result;
 }
 }
-extern "C" JNIEXPORT jobject JNICALL Java_io_joern_clang2cpg_parser_memory_ClangNative_parse0(JNIEnv *Env, jobject, jobjectArray Arguments, jstring Directory) {
+extern "C" JNIEXPORT jobject JNICALL Java_io_joern_clang2cpg_parser_memory_ClangNative_parseIncluded0(JNIEnv *Env, jobject, jobjectArray Arguments, jstring Directory, jobjectArray Included) {
   try {
     if (!Arguments || Env->GetArrayLength(Arguments) < 2) fail("compiler argv must contain compiler and source");
     JavaValues Java(Env); ParseState State(Java); std::vector<std::string> Command;
     for (jsize Index = 0; Index < Env->GetArrayLength(Arguments); ++Index) {
       auto Item = static_cast<jstring>(Env->GetObjectArrayElement(Arguments, Index)); Command.push_back(javaString(Env, Item)); Env->DeleteLocalRef(Item);
+    }
+    if (!Included) fail("included definition selection is null");
+    for (jsize Index = 0; Index < Env->GetArrayLength(Included); ++Index) {
+      auto Item = static_cast<jstring>(Env->GetObjectArrayElement(Included, Index));
+      const auto Source = javaString(Env, Item); Env->DeleteLocalRef(Item);
+      if (!State.IncludedSources.insert(Source).second) fail("duplicate included definition source");
     }
     const auto WorkingDirectory = javaString(Env, Directory);
     auto SelectedCompiler = llvm::sys::findProgramByName(Command.front());
