@@ -182,7 +182,7 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         if (role == "unnamed_padding") Seq.empty else Seq(key)
       }
       require(slots.distinct.size == slots.size, "Duplicate compiler field keys")
-      certifiedRecordSlots(owner) = slots
+      if (recordType("tag").str == "struct") certifiedRecordSlots(owner) = slots
     }
   }
   private def semanticAnnotations(node: NewNode, original: NativeValue): Unit = {

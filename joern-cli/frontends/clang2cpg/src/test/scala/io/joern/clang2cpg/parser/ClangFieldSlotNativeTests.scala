@@ -170,6 +170,61 @@ class ClangFieldSlotNativeTests extends AnyWordSpec with Matchers {
       try graph.member.size shouldBe 10
       finally graph.close()
     }
+    "retain native named union initialization of a nonfirst designated member" in {
+      withGraph(
+        "union Choice{int first;double second;};double pick(void){union Choice value={.second=2.0};" +
+          "return value.second;}"
+      ) { graph =>
+        val record = graph.typeDecl.nameExact("Choice").head
+        val keys   = fields(record, Seq("named_value" -> None, "named_value" -> None))
+        record.member.toList.sortBy(_.order).map(member => tag(member, "clang.declarationIdentity")) shouldBe keys
+        tag(record, "clang.zeroInitializedUnionField") shouldBe keys.head
+        val initializers = graph.call.nameExact("<operator>.arrayInitializer").toList
+        initializers.size shouldBe 1
+        tag(initializers.head, "clang.initializedUnionField") shouldBe keys(1)
+        initializers.head.argument.size shouldBe 1
+        initializers.head._taggedByOut.collect {
+          case entry: Tag if entry.name == "clang.initializerFieldKeys" => entry
+        }.size shouldBe 0
+        graph.fieldIdentifier
+          .canonicalNameExact("second")
+          .flatMap(_.out("REF"))
+          .collect { case member: Member =>
+            member.id
+          }
+          .toList
+          .shouldBe(List(record.member.toList.sortBy(_.order).apply(1).id))
+      }
+    }
+    "retain native anonymous union carrier initialization through a promoted field" in {
+      withGraph(
+        "struct Envelope{union{struct{int promoted;};long alternate;};int tail;};" +
+          "int read(void){struct Envelope value={.promoted=7,.tail=9};return value.promoted+value.tail;}"
+      ) { graph =>
+        val envelope     = graph.typeDecl.nameExact("Envelope").head
+        val outerKeys    = fields(envelope, Seq("anonymous_record_carrier" -> None, "named_value" -> None))
+        val unionOwner   = owner(envelope.member.toList.sortBy(_.order).head)
+        val union        = graph.typeDecl.filter(record => record.member.nonEmpty && owner(record) == unionOwner).head
+        val unionKeys    = fields(union, Seq("anonymous_record_carrier" -> None, "named_value" -> None))
+        val initializers = graph.call.nameExact("<operator>.arrayInitializer").toList
+        initializers.size shouldBe 3
+        val unionInit = initializers.find(call => owner(call) == unionOwner).get
+        tag(unionInit, "clang.initializedUnionField") shouldBe unionKeys.head
+        unionInit._taggedByOut.collect {
+          case entry: Tag if entry.name == "clang.initializerFieldKeys" => entry
+        }.size shouldBe 0
+        val outerInit = initializers.find(call => owner(call) == owner(envelope)).get
+        ujson.read(tag(outerInit, "clang.initializerFieldKeys")).arr.map(_.str).toSeq shouldBe outerKeys
+        graph.fieldIdentifier
+          .canonicalNameExact("promoted")
+          .flatMap(_.out("REF"))
+          .collect { case member: Member =>
+            member.name
+          }
+          .toList
+          .shouldBe(List("promoted"))
+      }
+    }
     "reject wholly missing native field facts even without an initializer" in {
       val selected = input("struct Single {int member;};")
       val document = ClangNative.load(library).parse(selected.command, selected.directory)
