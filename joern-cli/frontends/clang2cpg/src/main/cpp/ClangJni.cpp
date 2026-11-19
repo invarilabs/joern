@@ -49,17 +49,21 @@ std::string declarationUsr(const NamedDecl *Declaration) {
 }
 // All union members use one declaration-bound identity scheme, including named
 // members. Anonymous carriers are real FieldDecls, not failed-USR substitutes.
-std::string unionFieldIdentity(const FieldDecl *Field) {
-  if (!Field || !Field->getParent()->isUnion()) fail("union member identity requires a compiler union FieldDecl");
+std::string fieldIdentity(const FieldDecl *Field) {
+  if (!Field) fail("field identity requires a compiler FieldDecl");
   const RecordDecl *Owner = Field->getParent()->getDefinition();
-  if (!Owner) fail("union member identity requires a complete compiler record declaration");
+  if (!Owner) fail("field identity requires a complete compiler record declaration");
   unsigned Ordinal = 0, Selected = 0, Matches = 0;
   for (const FieldDecl *Candidate : Owner->fields()) {
     if (Candidate->getCanonicalDecl() == Field->getCanonicalDecl()) { Selected = Ordinal; ++Matches; }
     ++Ordinal;
   }
-  if (Matches != 1) fail("union member lacks unique canonical declaration ownership");
+  if (Matches != 1) fail("field lacks unique canonical declaration ownership");
   return declarationUsr(Owner) + "#field:" + std::to_string(Selected);
+}
+std::string unionFieldIdentity(const FieldDecl *Field) {
+  if (!Field || !Field->getParent()->isUnion()) fail("union member identity requires a compiler union FieldDecl");
+  return fieldIdentity(Field);
 }
 struct LocalFrame {
   JNIEnv *Env;
@@ -319,8 +323,22 @@ public:
     if (const auto *Named = dyn_cast<NamedDecl>(Declaration)) { Java.text(Info, "name", Named->getNameAsString()); Java.text(Result, "name", Named->getNameAsString()); }
     if (Declaration->isImplicit()) Java.flag(Result, "isImplicit", true);
     if (const auto *Value = dyn_cast<ValueDecl>(Declaration)) sourceType(Result, Info, Value->getType());
-    if (const auto *Field = dyn_cast<FieldDecl>(Declaration)) if (Field->getParent()->isUnion())
-      Java.text(Info, "usr", unionFieldIdentity(Field));
+    if (const auto *Field = dyn_cast<FieldDecl>(Declaration)) {
+      const bool Bitfield = Field->isBitField(), Padding = Field->isUnnamedBitField();
+      const bool Carrier = Field->isAnonymousStructOrUnion();
+      if (Padding && (!Bitfield || Carrier)) fail("contradictory unnamed bitfield role");
+      if (Carrier && !Field->getType()->isRecordType()) fail("anonymous carrier lacks compiler record type");
+      if (!Padding && !Carrier && !Field->getIdentifier()) fail("value field lacks compiler name");
+      Java.text(Info, "field_key", fieldIdentity(Field));
+      Java.text(Info, "field_role", Padding ? "unnamed_padding" : Carrier ? "anonymous_record_carrier" : "named_value");
+      Java.flag(Info, "is_bitfield", Bitfield);
+      if (Bitfield) {
+        if (!Field->getBitWidth() || Field->getBitWidth()->isValueDependent() || Field->getBitWidth()->isTypeDependent())
+          fail("bitfield lacks an evaluated constant width");
+        Java.integer(Info, "bit_width", Field->getBitWidthValue());
+      }
+      if (Field->getParent()->isUnion()) Java.text(Info, "usr", unionFieldIdentity(Field));
+    }
     jobject Children = Java.list();
     if (const auto *Variable = dyn_cast<VarDecl>(Declaration)) {
       Java.flag(Info, "file_scope", Variable->isFileVarDecl()); Java.flag(Info, "has_initializer", Variable->hasInit());

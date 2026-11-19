@@ -245,6 +245,20 @@
     } else if (const auto *Initializer = dyn_cast<InitListExpr>(Statement)) {
       const InitListExpr *Semantic = Initializer->isSemanticForm() ? Initializer : Initializer->getSemanticForm();
       if (!Semantic) fail("initializer lacks its compiler semantic form");
+      if (const auto *RecordShape = Semantic->getType()->getAs<RecordType>()) {
+        const RecordDecl *Owner = RecordShape->getDecl()->getDefinition();
+        if (!Owner) fail("struct initializer lacks a complete compiler owner");
+        if (!Owner->isUnion()) {
+          jobject Keys = Java.list(); unsigned Count = 0;
+          for (const FieldDecl *Field : Owner->fields()) if (!Field->isUnnamedBitField()) {
+            if (Count >= Semantic->getNumInits() || !Semantic->getInit(Count))
+              fail("struct initializer field has no semantic operand");
+            Java.add(Keys, Java.string(fieldIdentity(Field))); ++Count;
+          }
+          if (Count != Semantic->getNumInits()) fail("struct initializer semantic operand count differs from fields");
+          Java.put(Info, "initializer_field_keys", Keys);
+        }
+      }
       if (Semantic->getType()->isUnionType()) if (const FieldDecl *Field = Semantic->getInitializedFieldInUnion())
         Java.text(Info, "initialized_union_field", unionFieldIdentity(Field));
       if (const Expr *Filler = Semantic->getArrayFiller()) {

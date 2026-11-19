@@ -20,6 +20,8 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
   private val declarations              = mutable.LinkedHashMap.empty[String, NativeValue]
   private val bindings                  = mutable.LinkedHashMap.empty[String, NewNode]
   private val methodContracts = mutable.Map.empty[NewMethod, (String, NativeValue)]
+  private val emptyRecordOwners = mutable.Set.empty[String]
+  private val certifiedRecordSlots = mutable.LinkedHashMap.empty[String, Seq[String]]
   private val recordOwners = mutable.Map.empty[String, NewTypeDecl]
   private val thisParameters = mutable.Map.empty[NewMethod, NewMethodParameterIn]
   private var activeThis: Option[NewMethodParameterIn] = None
@@ -141,7 +143,59 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
   def publishTags(): Unit = tagPass.publish()
   private def tag(node: NewNode, name: String, value: String): Unit =
     tagPass.attach(builder, node, strings(name), strings(value))
+  private def certifyRecordFields(record: NativeValue, fields: Seq[NativeValue]): Unit = {
+    val recordType     = info(record)("semantic_type")
+    val completeRecord = recordType("kind").str == "Record" && recordType("complete").bool
+    if (fields.isEmpty && completeRecord) emptyRecordOwners += recordType("declaration_usr").str
+    val factNames    = Seq("field_key", "field_role", "is_bitfield", "bit_width")
+    val nativeRecord = document.obj.get("schema_version").contains(NNum(1)) && completeRecord
+    if (nativeRecord || fields.exists(field => factNames.exists(info(field).obj.contains))) {
+      require(completeRecord, "Compiler field facts require a complete record owner")
+      val owner = recordType("declaration_usr").str
+      val slots = fields.zipWithIndex.flatMap { case (field, index) =>
+        val facts                               = info(field)
+        def required(name: String): NativeValue =
+          facts.obj.getOrElse(name, throw new IllegalArgumentException(s"Clang field ${identity(field)} lacks $name"))
+        val key = required("field_key").str
+        require(key == owner + "#field:" + index, "Clang field key disagrees with canonical owner/ordinal")
+        val role     = required("field_role").str
+        val bitfield = required("is_bitfield").bool
+        require(Set("named_value", "anonymous_record_carrier", "unnamed_padding")(role), "Unknown Clang field role")
+        if (bitfield) {
+          val width = required("bit_width").num
+          require(
+            width >= 0 && width <= 9007199254740991d && width == width.toLong.toDouble,
+            "Clang bitfield width is not an exact nonnegative integer"
+          )
+        } else require(!facts.obj.contains("bit_width"), "Nonbitfield has a Clang bit width")
+        val name     = required("name").str
+        val isRecord = required("semantic_type")("kind").str == "Record"
+        require(
+          role match {
+            case "named_value"              => name.nonEmpty
+            case "anonymous_record_carrier" => name.isEmpty && isRecord && !bitfield
+            case "unnamed_padding"          => name.isEmpty && !isRecord && bitfield
+            case other => throw new IllegalArgumentException("Unknown compiler field role: " + other)
+          },
+          "Clang field role contradicts declaration facts"
+        )
+        if (role == "unnamed_padding") Seq.empty else Seq(key)
+      }
+      require(slots.distinct.size == slots.size, "Duplicate compiler field keys")
+      certifiedRecordSlots(owner) = slots
+    }
+  }
   private def semanticAnnotations(node: NewNode, original: NativeValue): Unit = {
+    Seq("field_key" -> "clang.fieldKey", "field_role" -> "clang.fieldRole").foreach { case (key, name) =>
+      info(original).obj.get(key).foreach(value => tag(node, name, value.str))
+    }
+    Seq(
+      "is_bitfield"            -> "clang.isBitfield",
+      "bit_width"              -> "clang.bitWidth",
+      "initializer_field_keys" -> "clang.initializerFieldKeys"
+    ).foreach { case (key, name) =>
+      info(original).obj.get(key).foreach(value => tag(node, name, NativeValue.write(value)))
+    }
     info(original).obj.get("type").filter(_.str.nonEmpty).foreach(_ => tag(node, "clang.sourceTypeSpelling", sourceValueType(original)))
     info(original).obj.get("semantic_type").foreach(value => tag(node, "clang.semanticType", NativeValue.write(value)))
     info(original).obj.get("operand_semantic_type").foreach(value => tag(node, "clang.operandType", NativeValue.write(value)))
@@ -228,7 +282,9 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       val owner = namespace(filename(selected))
       ast(owner, declaration, owner.order + 1)
       alternatives.foreach(node => bindings(identity(node)) = declaration)
-      children(selected).filter(node => Set("FieldDecl", "EnumConstantDecl")(kind(node))).zipWithIndex.foreach {
+      val fields = children(selected).filter(node => Set("FieldDecl", "EnumConstantDecl")(kind(node)))
+      certifyRecordFields(selected, fields)
+      fields.zipWithIndex.foreach {
         case (field, index) =>
           val name          = info(field).obj.get("name").map(_.str).getOrElse("")
           val effectiveName = if (name.nonEmpty) name else "<anonymous-field>:" + info(field)("offset").num.toLong
@@ -746,6 +802,28 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         children(operands.head).flatMap(statements).zipWithIndex.foreach { case (child, index) => ast(block, child, index + 1) }
         block
       case "InitListExpr" =>
+        val certificate = info(original).obj.get("initializer_field_keys")
+        val recordOwner = info(original).obj
+          .get("semantic_type")
+          .filter(_("kind").str == "Record")
+          .map(_("declaration_usr").str)
+        if (certificate.nonEmpty || recordOwner.exists(certifiedRecordSlots.contains)) {
+          val keys = certificate
+            .getOrElse(throw new IllegalArgumentException("Missing Clang initializer field slots"))
+            .arr
+            .map(_.str)
+            .toSeq
+          val owner = recordOwner.getOrElse(throw new IllegalArgumentException("Field slots require a compiler record"))
+          val expected =
+            if (emptyRecordOwners(owner)) Seq.empty
+            else
+              certifiedRecordSlots.getOrElse(
+                owner,
+                throw new IllegalArgumentException("Clang initializer lacks certified owner fields")
+              )
+          require(keys == expected, "Clang initializer field slots lack exact owner/order")
+          require(keys.size == operands.size, "Clang initializer field-slot operand count differs")
+        }
         original.obj.get("array_filler") match {
           case None => call(original, "<operator>.arrayInitializer", operands.map(expression))
           case Some(value) =>
