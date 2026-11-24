@@ -626,14 +626,37 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
       case "AtomicExpr" =>
         val operation = info(original)("atomic")
         require(operation("name").str == original("name").str, "Clang atomic operation witnesses disagree")
+        val owner = identity(original)
+        require(owner.nonEmpty, "Clang atomic expression identity is empty")
+        val witnesses = operation("operands").arr.toSeq
+        def required(operand: NativeValue, key: String): String =
+          operand.obj.get(key).flatMap(_.strOpt).filter(_.nonEmpty).getOrElse(
+            throw new IllegalArgumentException("Clang atomic operand lacks nonempty " + key)
+          )
+        val roles = witnesses.map(required(_, "role"))
+        val identities = witnesses.map(required(_, "expression"))
+        require(roles.distinct.size == roles.size, "Clang atomic operand roles are duplicated")
+        require(identities.distinct.size == identities.size, "Clang atomic operand expressions are duplicated")
         val expressions = operands.groupBy(identity)
-        val values = operation("operands").arr.toSeq.map { operand =>
-          val candidates = expressions.getOrElse(operand("expression").str, Seq.empty)
-          require(candidates.size == 1, "Clang atomic operand is missing or ambiguous: " + operand("role").str)
-          expression(candidates.head)
+        require(expressions.values.forall(_.size == 1), "Clang atomic operand candidates are duplicated")
+        require(identities.toSet == expressions.keySet, "Clang atomic operand coverage is incomplete or unmatched")
+        val roots = java.util.Collections.newSetFromMap(
+          new java.util.IdentityHashMap[ExpressionNew, java.lang.Boolean]()
+        )
+        val values = witnesses.map { operand =>
+          val candidates = expressions(required(operand, "expression"))
+          require(candidates.size == 1, "Clang atomic operand is missing or ambiguous: " + required(operand, "role"))
+          val value = expression(candidates.head)
+          require(roots.add(value), "Clang atomic operands share an emitted root")
+          require(!astParents.keys.exists(_ eq value), "Clang atomic operand root already has an AST owner")
+          tag(value, "clang.atomicOperand", NativeValue.write(NObj(
+            "operation" -> NStr(owner), "role" -> operand("role"), "expression" -> operand("expression")
+          )))
+          value
         }
         val result = call(original, operation("name").str, values)
         tag(result, "clang.atomic", NativeValue.write(operation))
+        tag(result, "clang.atomicExpression", owner)
         result
       case "PredefinedExpr" =>
         val facts = info(original)
