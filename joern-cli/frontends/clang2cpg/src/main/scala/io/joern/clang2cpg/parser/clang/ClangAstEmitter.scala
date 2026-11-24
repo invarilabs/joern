@@ -640,15 +640,12 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
         val expressions = operands.groupBy(identity)
         require(expressions.values.forall(_.size == 1), "Clang atomic operand candidates are duplicated")
         require(identities.toSet == expressions.keySet, "Clang atomic operand coverage is incomplete or unmatched")
-        val roots = java.util.Collections.newSetFromMap(
-          new java.util.IdentityHashMap[ExpressionNew, java.lang.Boolean]()
-        )
+        val roots = new AtomicOperandRoots(astParents.keys)
         val values = witnesses.map { operand =>
           val candidates = expressions(required(operand, "expression"))
           require(candidates.size == 1, "Clang atomic operand is missing or ambiguous: " + required(operand, "role"))
           val value = expression(candidates.head)
-          require(roots.add(value), "Clang atomic operands share an emitted root")
-          require(!astParents.keys.exists(_ eq value), "Clang atomic operand root already has an AST owner")
+          roots.claim(value)
           tag(value, "clang.atomicOperand", NativeValue.write(NObj(
             "operation" -> NStr(owner), "role" -> operand("role"), "expression" -> operand("expression")
           )))
@@ -1234,5 +1231,16 @@ class ClangAstEmitter(graph: Cpg, evidence: NativeGraphEvidence, graphRoot: Opti
     emitted.toVector.filterNot(node => node.isInstanceOf[NewTag] || node.isInstanceOf[NewFile]).foreach(node =>
       tag(node, "clang.translationUnitSource", evidence.source.toString)
     )
+  }
+}
+
+/** Per-AtomicExpr ownership validation before attaching executable arguments. */
+private[parser] final class AtomicOperandRoots(parents: Iterable[NewNode]) {
+  private val roots = java.util.Collections.newSetFromMap(
+    new java.util.IdentityHashMap[ExpressionNew, java.lang.Boolean]()
+  )
+  def claim(value: ExpressionNew): Unit = {
+    require(roots.add(value), "Clang atomic operands share an emitted root")
+    require(!parents.exists(_ eq value), "Clang atomic operand root already has an AST owner")
   }
 }

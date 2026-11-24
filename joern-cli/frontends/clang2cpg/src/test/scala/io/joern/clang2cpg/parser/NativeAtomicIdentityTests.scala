@@ -1,6 +1,6 @@
 package io.joern.clang2cpg.parser
 
-import io.joern.clang2cpg.parser.clang.ClangAstEmitter
+import io.joern.clang2cpg.parser.clang.{ClangAstEmitter, AtomicOperandRoots}
 import io.joern.clang2cpg.parser.memory.*
 import io.shiftleft.codepropertygraph.generated.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes.*
@@ -29,8 +29,7 @@ class NativeAtomicIdentityTests extends AnyWordSpec with Matchers {
   }
   private def syntax(node: NativeValue): Seq[NativeValue] =
     Seq(node) ++ node.obj.get("inner").toSeq.flatMap(_.arr).flatMap(syntax)
-  private def emit(selected: ClangInput, document: NativeValue): Cpg = {
-    val graph = Cpg.empty
+  private def emit(selected: ClangInput, document: NativeValue, graph: Cpg = Cpg.empty): Cpg = {
     val paths = Seq(library, Path.of(compiler), selected.source)
     val tools = paths.map(p => p.toRealPath().toString -> NativeGraphEvidence.digest(p.toRealPath())).toMap
     val aliases = paths.map(p => p.toString -> p.toRealPath().toString).toMap
@@ -104,6 +103,67 @@ class NativeAtomicIdentityTests extends AnyWordSpec with Matchers {
           c.argument.foreach(a => tags(a, "clang.atomicOperand") shouldBe Nil)
         }
       }
+    }
+    "keep colliding compiler identities scoped to two TUs in one CPG" in {
+      val inputs = Seq(input(source), input(source.replace("void f", "void g")))
+      val documents = inputs.map(i => ClangNative.load(library).parse(i.command, i.directory))
+      def atomic(document: NativeValue): NativeValue =
+        syntax(document("ast")).find(n => n.obj.get("kind").exists(_.str == "AtomicExpr")).get
+      val owners = documents.map(atomic)
+      val witnesses = documents.zip(owners).map { case (d, n) => d("nodes")(n("id").str)("atomic") }
+      val replacements = (Seq(owners(1)("id").str -> owners.head("id").str) ++
+        witnesses(1)("operands").arr.zip(witnesses.head("operands").arr).map { case (a, b) =>
+          a("expression").str -> b("expression").str
+        }).toMap
+      // Consistently rename only native expression IDs, retaining both real source closures.
+      def collide(value: NativeValue): NativeValue = {
+        if (value.strOpt.nonEmpty) NStr(replacements.getOrElse(value.str, value.str))
+        else if (value.objOpt.nonEmpty) NObj.from(value.obj.toSeq.map { case (key, entry) =>
+          replacements.getOrElse(key, key) -> collide(entry)
+        })
+        else if (value.arrOpt.nonEmpty) NArr.from(value.arr.map(collide))
+        else value
+      }
+      val graph = Cpg.empty
+      try {
+        emit(inputs.head, documents.head, graph)
+        emit(inputs(1), collide(documents(1)), graph)
+        checkAtomic(graph)
+        val calls = graph.call.nameExact("__atomic_store_n").toList
+        calls.size shouldBe 2
+        calls.map(c => tag(c, "clang.atomicExpression")).distinct.size shouldBe 1
+        calls.map(c => tag(c, "clang.translationUnitSource")).toSet shouldBe inputs.map(_.source.toString).toSet
+        def tuple(arg: Expression): (String, String, String, String) = {
+          val relation = ujson.read(tag(arg, "clang.atomicOperand"))
+          (tag(arg, "clang.translationUnitSource"), relation("operation").str,
+            relation("role").str, relation("expression").str)
+        }
+        val left = calls.head.argument.toList.sortBy(_.argumentIndex).map(a => tuple(a))
+        val right = calls(1).argument.toList.sortBy(_.argumentIndex).map(a => tuple(a))
+        left.map(t => (t._2, t._3, t._4)) shouldBe right.map(t => (t._2, t._3, t._4))
+        left.toSet.intersect(right.toSet) shouldBe empty
+        calls.head.argument.foreach { foreign =>
+          tag(foreign, "clang.translationUnitSource") should not be tag(calls(1), "clang.translationUnitSource")
+          foreign._astIn.toList.map(_.id) shouldBe List(calls.head.id)
+        }
+      } finally graph.close()
+    }
+    "reject the same returned NewNode root with the actual production guard" in {
+      val guard = new AtomicOperandRoots(Seq.empty)
+      val first = NewIdentifier().name("v").code("v").typeFullName("int")
+      val equalLooking = NewIdentifier().name("v").code("v").typeFullName("int")
+      guard.claim(first)
+      guard.claim(equalLooking)
+      val error = intercept[IllegalArgumentException] { guard.claim(first) }
+      error.getMessage should include ("Clang atomic operands share an emitted root")
+    }
+    "reject an already AST-owned returned NewNode with the actual production guard" in {
+      val child = NewIdentifier().name("v").code("v").typeFullName("int")
+      val parent = NewCall().name("prior").code("prior(v)")
+      val parents = mutable.Map[NewNode, NewNode](child -> parent)
+      val guard = new AtomicOperandRoots(parents.keys)
+      val error = intercept[IllegalArgumentException] { guard.claim(child) }
+      error.getMessage should include ("Clang atomic operand root already has an AST owner")
     }
     "reject incomplete, duplicate and unmatched native operand certificates" in {
       val mutations: Seq[(String, (NativeValue, NativeValue) => Unit)] = Seq(
